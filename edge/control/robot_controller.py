@@ -126,7 +126,16 @@ class CameraServoController:
         duration_s = max(0.02, float(duration_ms) / 1000.0)
         # Prefer bus-servo API (ID-based), fallback to PWM if only that is wired.
         if hasattr(self._driver_instance, "bus_servo_set_position"):
-            self._driver_instance.bus_servo_set_position(duration_s, [[int(servo_id), int(pulse)]])
+            # ros_robot_controller_sdk bus-servo position is typically 0..1000.
+            # Convert from pulse-style input (500..2500us) to bus-servo scale.
+            bus_pos = int(round((int(pulse) - 500) * 1000.0 / 2000.0))
+            bus_pos = max(0, min(1000, bus_pos))
+            try:
+                if hasattr(self._driver_instance, "bus_servo_enable_torque"):
+                    self._driver_instance.bus_servo_enable_torque(int(servo_id), 1)
+            except Exception:
+                pass
+            self._driver_instance.bus_servo_set_position(duration_s, [[int(servo_id), bus_pos]])
             return
         if hasattr(self._driver_instance, "pwm_servo_set_position"):
             self._driver_instance.pwm_servo_set_position(duration_s, [[int(servo_id), int(pulse)]])
