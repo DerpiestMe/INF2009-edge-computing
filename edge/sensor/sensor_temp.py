@@ -5,12 +5,16 @@ from collections import deque
 from typing import Any, Deque, Dict, Optional
 
 try:
-	SMBus = importlib.import_module("smbus2").SMBus
+	smbus2 = importlib.import_module("smbus2")
+	SMBus = smbus2.SMBus
+	i2c_msg = smbus2.i2c_msg
 except ModuleNotFoundError:  # pragma: no cover - hardware/runtime dependency
 	try:
 		SMBus = importlib.import_module("smbus").SMBus
+		i2c_msg = None
 	except ModuleNotFoundError:
 		SMBus = None
+		i2c_msg = None
 
 
 class TemperatureHumiditySensor:
@@ -45,6 +49,20 @@ class TemperatureHumiditySensor:
 		self._last_ok_ts = 0.0
 		self._error_count = 0
 		self._buffer: Deque[Dict[str, Any]] = deque(maxlen=buffer_size)
+		self._read_mode = "block_data"
+
+	@staticmethod
+	def _i2c_error_payload(reason: str, error: Exception, stage: str) -> Dict[str, Any]:
+		payload: Dict[str, Any] = {
+			"reason": reason,
+			"stage": stage,
+			"error_type": error.__class__.__name__,
+			"error_message": str(error),
+		}
+		errno = getattr(error, "errno", None)
+		if errno is not None:
+			payload["errno"] = errno
+		return payload
 
 	def start(self) -> bool:
 		if SMBus is None:
@@ -105,8 +123,23 @@ class TemperatureHumiditySensor:
 		if self._bus is None:
 			return None
 
-		raw = self._bus.read_i2c_block_data(self.i2c_address, 0x00, 7)
-		return raw
+		if self._read_mode == "rdwr" and i2c_msg is not None and hasattr(self._bus, "i2c_rdwr"):
+			read = i2c_msg.read(self.i2c_address, 7)
+			self._bus.i2c_rdwr(read)
+			return list(read)
+
+		try:
+			raw = self._bus.read_i2c_block_data(self.i2c_address, 0x00, 7)
+			return raw
+		except OSError:
+			# Some controllers/sensors reject command-byte reads but allow plain I2C reads.
+			if i2c_msg is None or not hasattr(self._bus, "i2c_rdwr"):
+				raise
+			read = i2c_msg.read(self.i2c_address, 7)
+			self._bus.i2c_rdwr(read)
+			self._read_mode = "rdwr"
+			self._logger.info("Temperature sensor switched to i2c_rdwr read mode")
+			return list(read)
 
 	def _ensure_calibrated(self) -> None:
 		if self._bus is None:
@@ -166,18 +199,24 @@ class TemperatureHumiditySensor:
 		try:
 			self._ensure_calibrated()
 			self._trigger_measurement()
-		except OSError:
+		except OSError as error:
 			self._error_count += 1
-			return self._build_record(status="degraded", payload={"reason": "i2c_write_failed"})
+			return self._build_record(
+				status="degraded",
+				payload=self._i2c_error_payload("i2c_write_failed", error, stage="trigger_measurement"),
+			)
 
 		last_raw = None
 		parsed = None
 		for attempt in range(self.max_busy_retries):
 			try:
 				raw = self._read_raw()
-			except OSError:
+			except OSError as error:
 				self._error_count += 1
-				return self._build_record(status="degraded", payload={"reason": "i2c_read_failed"})
+				return self._build_record(
+					status="degraded",
+					payload=self._i2c_error_payload("i2c_read_failed", error, stage=f"read_attempt_{attempt + 1}"),
+				)
 
 			if raw is None:
 				return None
@@ -218,6 +257,7 @@ class TemperatureHumiditySensor:
 				"temperature_unit": "C",
 				"humidity_unit": "%RH",
 				"raw": last_raw,
+				"read_mode": self._read_mode,
 			},
 		)
 		self._buffer.append(record)
