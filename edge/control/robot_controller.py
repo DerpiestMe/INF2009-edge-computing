@@ -30,6 +30,7 @@ class CameraServoController:
         self._driver_name: Optional[str] = None
         self._driver: Any = None
         self._set_pulse_fn = None
+        self._driver_instance: Any = None
         self._mode = "none"
         self._current_pulse = self.center_pulse
         self._sweep_direction = 1
@@ -96,6 +97,41 @@ class CameraServoController:
                 self._set_pulse_fn = module.setPWMServoPulse
                 self._mode = "pwm_servo"
                 return
+
+        # Fallback: serial SDK with Board class (ros_robot_controller_sdk.py).
+        ros_candidates: Sequence[str] = ("ros_robot_controller_sdk",)
+        for module_name in ros_candidates:
+            module, error = self._safe_import(module_name)
+            self._module_attempts.append((module_name, error))
+            if module is None or not hasattr(module, "Board"):
+                continue
+            try:
+                serial_device = os.getenv("ROS_ROBOT_CONTROLLER_PORT", "/dev/ttyAMA0")
+                serial_baud = int(os.getenv("ROS_ROBOT_CONTROLLER_BAUD", "1000000"))
+                serial_timeout = float(os.getenv("ROS_ROBOT_CONTROLLER_TIMEOUT", "0.5"))
+                board = module.Board(device=serial_device, baudrate=serial_baud, timeout=serial_timeout)
+                self._driver = module
+                self._driver_instance = board
+                self._driver_name = module_name
+                self._set_pulse_fn = self._set_pulse_via_ros_board
+                self._mode = "ros_bus_servo"
+                return
+            except Exception as exc:
+                self._module_attempts.append((f"{module_name}.Board(...)", str(exc)))
+                continue
+
+    def _set_pulse_via_ros_board(self, servo_id: int, pulse: int, duration_ms: int) -> None:
+        if self._driver_instance is None:
+            raise RuntimeError("ROS board instance is not initialized")
+        duration_s = max(0.02, float(duration_ms) / 1000.0)
+        # Prefer bus-servo API (ID-based), fallback to PWM if only that is wired.
+        if hasattr(self._driver_instance, "bus_servo_set_position"):
+            self._driver_instance.bus_servo_set_position(duration_s, [[int(servo_id), int(pulse)]])
+            return
+        if hasattr(self._driver_instance, "pwm_servo_set_position"):
+            self._driver_instance.pwm_servo_set_position(duration_s, [[int(servo_id), int(pulse)]])
+            return
+        raise RuntimeError("ROS board instance has no servo control methods")
 
     @property
     def is_available(self) -> bool:
