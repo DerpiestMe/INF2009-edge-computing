@@ -25,6 +25,7 @@ class TemperatureHumiditySensor:
 		i2c_address: int = 0x38,
 		stale_seconds: float = 5.0,
 		read_wait_seconds: float = 0.08,
+		max_busy_retries: int = 5,
 		buffer_size: int = 100,
 	) -> None:
 		self.sensor_type = "temperature_humidity"
@@ -33,6 +34,7 @@ class TemperatureHumiditySensor:
 		self.i2c_address = i2c_address
 		self.stale_seconds = stale_seconds
 		self.read_wait_seconds = read_wait_seconds
+		self.max_busy_retries = max_busy_retries
 
 		self._logger = logging.getLogger(self.__class__.__name__)
 		self._bus = None
@@ -107,13 +109,13 @@ class TemperatureHumiditySensor:
 		return raw
 
 	@staticmethod
-	def _parse_aht20(raw: list) -> Optional[Dict[str, float]]:
+	def _parse_aht20(raw: list) -> Optional[Dict[str, Any]]:
 		if len(raw) < 7:
 			return None
 
 		busy = (raw[0] & 0x80) != 0
 		if busy:
-			return None
+			return {"busy": True}
 
 		humidity_raw = ((raw[1] << 16) | (raw[2] << 8) | raw[3]) >> 4
 		temperature_raw = ((raw[3] & 0x0F) << 16) | (raw[4] << 8) | raw[5]
@@ -121,7 +123,11 @@ class TemperatureHumiditySensor:
 		humidity = (humidity_raw * 100.0) / 1048576.0
 		temperature = (temperature_raw * 200.0) / 1048576.0 - 50.0
 
-		return {"temperature_c": round(temperature, 2), "humidity_rh": round(humidity, 2)}
+		return {
+			"busy": False,
+			"temperature_c": round(temperature, 2),
+			"humidity_rh": round(humidity, 2),
+		}
 
 	def read(self) -> Optional[Dict[str, Any]]:
 		self._last_read_ts = time.time()
@@ -130,19 +136,40 @@ class TemperatureHumiditySensor:
 			self._error_count += 1
 			return self._build_record(status="offline", payload={"reason": "i2c_unavailable"})
 
-		try:
-			raw = self._read_raw()
-		except OSError:
-			self._error_count += 1
-			return self._build_record(status="degraded", payload={"reason": "i2c_read_failed"})
+		last_raw = None
+		parsed = None
+		for _ in range(self.max_busy_retries):
+			try:
+				raw = self._read_raw()
+			except OSError:
+				self._error_count += 1
+				return self._build_record(status="degraded", payload={"reason": "i2c_read_failed"})
 
-		if raw is None:
-			return None
+			if raw is None:
+				return None
 
-		parsed = self._parse_aht20(raw)
+			last_raw = raw
+			parsed = self._parse_aht20(raw)
+			if parsed is None:
+				break
+			if not parsed.get("busy", False):
+				break
+			time.sleep(self.read_wait_seconds)
+
 		if parsed is None:
 			self._error_count += 1
-			return self._build_record(status="degraded", payload={"reason": "sensor_busy_or_invalid", "raw": raw})
+			return self._build_record(status="degraded", payload={"reason": "invalid_payload", "raw": last_raw})
+
+		if parsed.get("busy", False):
+			self._error_count += 1
+			return self._build_record(
+				status="degraded",
+				payload={
+					"reason": "sensor_busy_timeout",
+					"raw": last_raw,
+					"retries": self.max_busy_retries,
+				},
+			)
 
 		self._last_ok_ts = time.time()
 		record = self._build_record(
@@ -152,7 +179,7 @@ class TemperatureHumiditySensor:
 				"humidity_rh": parsed["humidity_rh"],
 				"temperature_unit": "C",
 				"humidity_unit": "%RH",
-				"raw": raw,
+				"raw": last_raw,
 			},
 		)
 		self._buffer.append(record)

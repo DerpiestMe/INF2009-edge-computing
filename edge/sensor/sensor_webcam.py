@@ -1,7 +1,8 @@
 import logging
 import time
+from pathlib import Path
 from collections import deque
-from typing import Any, Deque, Dict, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 try:
 	import cv2
@@ -15,7 +16,8 @@ class WebcamSensor:
 	def __init__(
 		self,
 		sensor_id: str = "webcam-01",
-		device_index: int = 0,
+		device_index: Optional[int] = None,
+		candidate_indices: Optional[List[int]] = None,
 		width: int = 640,
 		height: int = 480,
 		target_fps: float = 10.0,
@@ -26,6 +28,7 @@ class WebcamSensor:
 		self.sensor_type = "webcam"
 		self.sensor_id = sensor_id
 		self.device_index = device_index
+		self.candidate_indices = candidate_indices or [0, 1, 2, 3, 4, 5]
 		self.width = width
 		self.height = height
 		self.target_fps = target_fps
@@ -40,34 +43,64 @@ class WebcamSensor:
 		self._last_ok_ts = 0.0
 		self._error_count = 0
 		self._last_reconnect_attempt_ts = 0.0
+		self._active_device_index: Optional[int] = None
 
 		self._metadata_buffer: Deque[Dict[str, Any]] = deque(maxlen=buffer_size)
 		self._frame_buffer: Deque[Tuple[int, float, Any]] = deque(maxlen=buffer_size)
+
+	def _candidate_device_indices(self) -> List[int]:
+		if self.device_index is not None:
+			return [self.device_index]
+
+		indices: List[int] = []
+		for dev in sorted(Path("/dev").glob("video*")):
+			suffix = dev.name.replace("video", "")
+			if suffix.isdigit():
+				indices.append(int(suffix))
+
+		if indices:
+			return indices
+		return list(self.candidate_indices)
+
+	def _open_capture(self, index: int) -> Optional[Any]:
+		cap = cv2.VideoCapture(index)
+		if not cap.isOpened():
+			cap.release()
+			return None
+
+		cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+		cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+		cap.set(cv2.CAP_PROP_FPS, self.target_fps)
+		return cap
 
 	def start(self) -> bool:
 		if cv2 is None:
 			self._logger.error("OpenCV is not installed. Install opencv-python.")
 			return False
 
-		self._cap = cv2.VideoCapture(self.device_index)
-		if not self._cap.isOpened():
-			self._logger.warning("Failed to open webcam device %s", self.device_index)
-			self._cap.release()
-			self._cap = None
-			return False
+		for index in self._candidate_device_indices():
+			cap = self._open_capture(index)
+			if cap is None:
+				continue
 
-		self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-		self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-		self._cap.set(cv2.CAP_PROP_FPS, self.target_fps)
-		self._running = True
-		self._logger.info("Webcam started on device %s", self.device_index)
-		return True
+			self._cap = cap
+			self._active_device_index = index
+			self._running = True
+			self._logger.info("Webcam started on device %s", index)
+			return True
+
+		self._cap = None
+		self._active_device_index = None
+		self._running = False
+		self._logger.warning("Failed to open webcam on candidate devices: %s", self._candidate_device_indices())
+		return False
 
 	def stop(self) -> None:
 		self._running = False
 		if self._cap is not None:
 			self._cap.release()
 			self._cap = None
+		self._active_device_index = None
 
 	def _status(self) -> str:
 		now = time.time()
@@ -115,7 +148,7 @@ class WebcamSensor:
 				self._error_count += 1
 				return self._build_record(
 					status="offline",
-					payload={"reason": "camera_unavailable", "device_index": self.device_index},
+					payload={"reason": "camera_unavailable", "device_index": self._active_device_index},
 				)
 
 		ok, frame = self._cap.read()
@@ -124,7 +157,7 @@ class WebcamSensor:
 			self._maybe_reconnect()
 			return self._build_record(
 				status="degraded",
-				payload={"reason": "frame_read_failed", "device_index": self.device_index},
+				payload={"reason": "frame_read_failed", "device_index": self._active_device_index},
 			)
 
 		self._sequence += 1
@@ -139,7 +172,7 @@ class WebcamSensor:
 				"width": width,
 				"height": height,
 				"channels": channels,
-				"device_index": self.device_index,
+				"device_index": self._active_device_index,
 			},
 		)
 
@@ -162,13 +195,28 @@ class WebcamSensor:
 if __name__ == "__main__":
 	logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 	sensor = WebcamSensor()
+	window_name = "USB Webcam Live"
+	display_enabled = cv2 is not None
+
+	if display_enabled:
+		cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 	try:
 		while True:
 			record = sensor.read()
 			if record is not None:
 				print(record)
+
+			if display_enabled:
+				latest = sensor.get_latest_frame()
+				if latest is not None:
+					_, _, frame = latest
+					cv2.imshow(window_name, frame)
+				if cv2.waitKey(1) & 0xFF == ord("q"):
+					break
 			time.sleep(0.1)
 	except KeyboardInterrupt:
 		pass
 	finally:
+		if display_enabled:
+			cv2.destroyAllWindows()
 		sensor.stop()

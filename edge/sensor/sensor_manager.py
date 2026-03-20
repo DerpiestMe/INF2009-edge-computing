@@ -33,7 +33,8 @@ class SensorManager:
 			"webcam": SensorSchedule(
 				sensor=WebcamSensor(
 					sensor_id="webcam-01",
-					device_index=0,
+					device_index=None,
+					candidate_indices=[0, 1, 2, 3, 4, 5],
 					width=640,
 					height=480,
 					target_fps=10.0,
