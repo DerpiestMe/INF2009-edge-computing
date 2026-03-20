@@ -25,7 +25,8 @@ class TemperatureHumiditySensor:
 		i2c_address: int = 0x38,
 		stale_seconds: float = 5.0,
 		read_wait_seconds: float = 0.08,
-		max_busy_retries: int = 5,
+		max_busy_retries: int = 10,
+		initial_wait_seconds: float = 0.1,
 		buffer_size: int = 100,
 	) -> None:
 		self.sensor_type = "temperature_humidity"
@@ -35,6 +36,7 @@ class TemperatureHumiditySensor:
 		self.stale_seconds = stale_seconds
 		self.read_wait_seconds = read_wait_seconds
 		self.max_busy_retries = max_busy_retries
+		self.initial_wait_seconds = initial_wait_seconds
 
 		self._logger = logging.getLogger(self.__class__.__name__)
 		self._bus = None
@@ -138,7 +140,7 @@ class TemperatureHumiditySensor:
 
 		last_raw = None
 		parsed = None
-		for _ in range(self.max_busy_retries):
+		for attempt in range(self.max_busy_retries):
 			try:
 				raw = self._read_raw()
 			except OSError:
@@ -154,7 +156,11 @@ class TemperatureHumiditySensor:
 				break
 			if not parsed.get("busy", False):
 				break
-			time.sleep(self.read_wait_seconds)
+			
+			if attempt == 0:
+				time.sleep(self.initial_wait_seconds)
+			else:
+				time.sleep(self.read_wait_seconds)
 
 		if parsed is None:
 			self._error_count += 1

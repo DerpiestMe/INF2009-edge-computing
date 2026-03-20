@@ -60,6 +60,8 @@ class SensorManager:
 					i2c_bus_index=1,
 					i2c_address=0x38,
 					stale_seconds=5.0,
+					max_busy_retries=10,
+					initial_wait_seconds=0.1,
 					buffer_size=100,
 				),
 				poll_interval=1.0,

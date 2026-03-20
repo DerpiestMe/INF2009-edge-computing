@@ -1,0 +1,21 @@
+# Edge Computing Requirements for PuppyPi (Raspberry Pi)
+# Install with: pip install -r requirements.txt
+
+# Computer Vision
+opencv-python==4.8.1.78
+
+# Machine Learning / YOLOv8 (for person detection and vision inference)
+# Note: ultralytics requires numpy, torch, and PIL dependencies
+ultralytics==8.0.195
+
+# Serial Communication (for gas sensor on Raspberry Pi Pico)
+pyserial==3.5
+
+# I2C Communication (for temperature/humidity sensor)
+smbus2==0.4.2
+
+# Optional: HiWonder SDK (for servo control on PuppyPi)
+# Note: These may need to be installed from the HiWonder repository
+# Uncomment if Board interfaces are available in your environment
+# HiwonderSDK>=1.0.0
+

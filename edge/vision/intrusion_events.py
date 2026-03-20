@@ -1,3 +1,6 @@
+import time
+from collections import deque
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -59,3 +62,63 @@ class ZoneManager:
                 2,
             )
         return frame
+
+
+class IntrusionEventManager:
+    """Tracks intrusions in restricted zones with confirmation and cooldown."""
+
+    def __init__(
+        self,
+        confirm_frames: int = 4,
+        cooldown_seconds: float = 5.0,
+        snapshot_dir: str = "snapshots",
+    ) -> None:
+        self.confirm_frames = confirm_frames
+        self.cooldown_seconds = cooldown_seconds
+        self.snapshot_dir = Path(snapshot_dir)
+        self.snapshot_dir.mkdir(exist_ok=True)
+
+        self._intrusion_counter = 0
+        self._last_event_ts = 0.0
+        self._frame_history: deque = deque(maxlen=confirm_frames)
+
+    def process(self, frame, detections: List[Dict]) -> Optional[Dict]:
+        """
+        Process a frame and detections to identify intrusion events.
+        Returns an intrusion event dict if one is confirmed, otherwise None.
+        """
+        now = time.time()
+
+        # Check if any person is inside a restricted zone
+        has_intrusion = any(det.get("inside_zone", False) for det in detections)
+
+        if has_intrusion:
+            self._intrusion_counter += 1
+            self._frame_history.append(True)
+        else:
+            self._intrusion_counter = 0
+            self._frame_history.append(False)
+
+        # Confirm intrusion after N consecutive frames with detection
+        if self._intrusion_counter >= self.confirm_frames:
+            # Check cooldown: prevent duplicate events
+            if now - self._last_event_ts >= self.cooldown_seconds:
+                self._last_event_ts = now
+                self._intrusion_counter = 0
+
+                # Save snapshot
+                snapshot_path = self.snapshot_dir / f"intrusion_{int(now)}_{self._intrusion_counter}.jpg"
+                cv2.imwrite(str(snapshot_path), frame)
+
+                intrusion_in_zone = [det for det in detections if det.get("inside_zone")]
+                event = {
+                    "timestamp": now,
+                    "type": "intrusion",
+                    "zone_id": intrusion_in_zone[0].get("zone_id") if intrusion_in_zone else None,
+                    "num_persons": len(intrusion_in_zone),
+                    "snapshot_path": str(snapshot_path),
+                    "confirm_frames": self.confirm_frames,
+                }
+                return event
+
+        return None
