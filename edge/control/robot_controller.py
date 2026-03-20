@@ -16,12 +16,14 @@ class CameraServoController:
     def __init__(
         self,
         servo_id: int = DEFAULT_SERVO_ID,
+        servo_mode: str = "auto",
         min_pulse: int = 500,
         max_pulse: int = 2500,
         center_pulse: int = DEFAULT_CENTER_PULSE,
         default_duration_ms: int = 200,
     ) -> None:
         self.servo_id = int(servo_id)
+        self.servo_mode = str(servo_mode).lower()
         self.min_pulse = int(min_pulse)
         self.max_pulse = int(max_pulse)
         self.center_pulse = int(center_pulse)
@@ -113,34 +115,54 @@ class CameraServoController:
                 self._driver = module
                 self._driver_instance = board
                 self._driver_name = module_name
-                self._set_pulse_fn = self._set_pulse_via_ros_board
-                self._mode = "ros_bus_servo"
+                requested_mode = os.getenv("ROS_SERVO_MODE", self.servo_mode).lower()
+                has_bus = hasattr(board, "bus_servo_set_position")
+                has_pwm = hasattr(board, "pwm_servo_set_position")
+
+                if requested_mode == "pwm" and has_pwm:
+                    self._set_pulse_fn = self._set_pulse_via_ros_board_pwm
+                    self._mode = "ros_pwm_servo"
+                elif requested_mode == "bus" and has_bus:
+                    self._set_pulse_fn = self._set_pulse_via_ros_board_bus
+                    self._mode = "ros_bus_servo"
+                elif has_pwm:
+                    # Default to PWM for camera servos/channels on this SDK.
+                    self._set_pulse_fn = self._set_pulse_via_ros_board_pwm
+                    self._mode = "ros_pwm_servo"
+                elif has_bus:
+                    self._set_pulse_fn = self._set_pulse_via_ros_board_bus
+                    self._mode = "ros_bus_servo"
+                else:
+                    self._module_attempts.append((f"{module_name}.Board methods", "No bus/pwm servo methods found"))
+                    continue
                 return
             except Exception as exc:
                 self._module_attempts.append((f"{module_name}.Board(...)", str(exc)))
                 continue
 
-    def _set_pulse_via_ros_board(self, servo_id: int, pulse: int, duration_ms: int) -> None:
+    def _set_pulse_via_ros_board_bus(self, servo_id: int, pulse: int, duration_ms: int) -> None:
         if self._driver_instance is None:
             raise RuntimeError("ROS board instance is not initialized")
         duration_s = max(0.02, float(duration_ms) / 1000.0)
-        # Prefer bus-servo API (ID-based), fallback to PWM if only that is wired.
-        if hasattr(self._driver_instance, "bus_servo_set_position"):
-            # ros_robot_controller_sdk bus-servo position is typically 0..1000.
-            # Convert from pulse-style input (500..2500us) to bus-servo scale.
-            bus_pos = int(round((int(pulse) - 500) * 1000.0 / 2000.0))
-            bus_pos = max(0, min(1000, bus_pos))
-            try:
-                if hasattr(self._driver_instance, "bus_servo_enable_torque"):
-                    self._driver_instance.bus_servo_enable_torque(int(servo_id), 1)
-            except Exception:
-                pass
-            self._driver_instance.bus_servo_set_position(duration_s, [[int(servo_id), bus_pos]])
-            return
-        if hasattr(self._driver_instance, "pwm_servo_set_position"):
-            self._driver_instance.pwm_servo_set_position(duration_s, [[int(servo_id), int(pulse)]])
-            return
-        raise RuntimeError("ROS board instance has no servo control methods")
+        if not hasattr(self._driver_instance, "bus_servo_set_position"):
+            raise RuntimeError("ROS board instance has no bus servo control methods")
+        # ros_robot_controller_sdk bus-servo position is typically 0..1000.
+        bus_pos = int(round((int(pulse) - 500) * 1000.0 / 2000.0))
+        bus_pos = max(0, min(1000, bus_pos))
+        try:
+            if hasattr(self._driver_instance, "bus_servo_enable_torque"):
+                self._driver_instance.bus_servo_enable_torque(int(servo_id), 1)
+        except Exception:
+            pass
+        self._driver_instance.bus_servo_set_position(duration_s, [[int(servo_id), bus_pos]])
+
+    def _set_pulse_via_ros_board_pwm(self, servo_id: int, pulse: int, duration_ms: int) -> None:
+        if self._driver_instance is None:
+            raise RuntimeError("ROS board instance is not initialized")
+        if not hasattr(self._driver_instance, "pwm_servo_set_position"):
+            raise RuntimeError("ROS board instance has no pwm servo control methods")
+        duration_s = max(0.02, float(duration_ms) / 1000.0)
+        self._driver_instance.pwm_servo_set_position(duration_s, [[int(servo_id), int(pulse)]])
 
     @property
     def is_available(self) -> bool:

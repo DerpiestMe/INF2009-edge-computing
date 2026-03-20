@@ -31,6 +31,7 @@ class IntegratedEdgeApp:
         model_path: str = "yolov8n.pt",
         confidence: float = 0.6,
         servo_id: int = 9,
+        servo_mode: str = "pwm",
         sweep_left: int = 1100,
         sweep_right: int = 1900,
         sweep_step: int = 35,
@@ -65,7 +66,7 @@ class IntegratedEdgeApp:
             buffer_size=100,
         )
         self.vision = VisionInference(model_path=model_path, conf_threshold=confidence)
-        self.servo = CameraServoController(servo_id=servo_id)
+        self.servo = CameraServoController(servo_id=servo_id, servo_mode=servo_mode)
 
         self.sweep_left = sweep_left
         self.sweep_right = sweep_right
@@ -206,6 +207,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", default="yolov8n.pt")
     parser.add_argument("--confidence", type=float, default=0.6)
     parser.add_argument("--servo-id", type=int, default=9, help="Camera servo ID/channel (default: 9)")
+    parser.add_argument(
+        "--servo-mode",
+        choices=["auto", "pwm", "bus"],
+        default="pwm",
+        help="Servo control mode preference for supported SDKs",
+    )
     parser.add_argument("--sweep-left", type=int, default=1100)
     parser.add_argument("--sweep-right", type=int, default=1900)
     parser.add_argument("--sweep-step", type=int, default=35)
@@ -230,6 +237,7 @@ def main() -> None:
         model_path=args.model_path,
         confidence=args.confidence,
         servo_id=args.servo_id,
+        servo_mode=args.servo_mode,
         sweep_left=args.sweep_left,
         sweep_right=args.sweep_right,
         sweep_step=args.sweep_step,
