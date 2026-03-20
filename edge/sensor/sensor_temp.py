@@ -16,6 +16,7 @@ except ModuleNotFoundError:  # pragma: no cover - hardware/runtime dependency
 class TemperatureHumiditySensor:
 	"""Owns raw I2C reads for HiWonder temperature/humidity sensor."""
 
+	INIT_CMD = [0xBE, 0x08, 0x00]
 	MEASURE_CMD = [0xAC, 0x33, 0x00]
 
 	def __init__(
@@ -104,11 +105,35 @@ class TemperatureHumiditySensor:
 		if self._bus is None:
 			return None
 
-		# AHT20-compatible measurement command used by many 0x38 temp/humidity modules.
-		self._bus.write_i2c_block_data(self.i2c_address, self.MEASURE_CMD[0], self.MEASURE_CMD[1:])
-		time.sleep(self.read_wait_seconds)
 		raw = self._bus.read_i2c_block_data(self.i2c_address, 0x00, 7)
 		return raw
+
+	def _ensure_calibrated(self) -> None:
+		if self._bus is None:
+			return
+
+		try:
+			raw = self._read_raw()
+		except OSError:
+			return
+
+		if raw is None or len(raw) < 1:
+			return
+
+		is_calibrated = (raw[0] & 0x08) != 0
+		if is_calibrated:
+			return
+
+		# Some AHT20-compatible modules need an init/calibration command after power-up.
+		self._bus.write_i2c_block_data(self.i2c_address, self.INIT_CMD[0], self.INIT_CMD[1:])
+		time.sleep(0.02)
+
+	def _trigger_measurement(self) -> None:
+		if self._bus is None:
+			return
+
+		# Trigger conversion once, then poll status until busy clears.
+		self._bus.write_i2c_block_data(self.i2c_address, self.MEASURE_CMD[0], self.MEASURE_CMD[1:])
 
 	@staticmethod
 	def _parse_aht20(raw: list) -> Optional[Dict[str, Any]]:
@@ -137,6 +162,13 @@ class TemperatureHumiditySensor:
 		if self._bus is None and not self.start():
 			self._error_count += 1
 			return self._build_record(status="offline", payload={"reason": "i2c_unavailable"})
+
+		try:
+			self._ensure_calibrated()
+			self._trigger_measurement()
+		except OSError:
+			self._error_count += 1
+			return self._build_record(status="degraded", payload={"reason": "i2c_write_failed"})
 
 		last_raw = None
 		parsed = None
