@@ -36,6 +36,7 @@ class IntegratedEdgeApp:
         sweep_step: int = 35,
         sweep_interval_s: float = 0.1,
         auto_sweep: bool = False,
+        show_window: bool = True,
     ) -> None:
         self._logger = logging.getLogger(self.__class__.__name__)
         self._running = False
@@ -71,6 +72,7 @@ class IntegratedEdgeApp:
         self.sweep_step = sweep_step
         self.sweep_interval_s = sweep_interval_s
         self.auto_sweep = auto_sweep
+        self.show_window = show_window
 
         self._last_temp_record: Optional[Dict[str, Any]] = None
         self._last_gas_record: Optional[Dict[str, Any]] = None
@@ -87,6 +89,8 @@ class IntegratedEdgeApp:
         if not self.vision.is_ready():
             self._logger.warning("Vision model unavailable: %s", self.vision.load_error)
         self._logger.info("Servo driver: %s", self.servo.describe())
+        if not self.servo.is_available:
+            self._logger.warning("Servo diagnostics: %s", self.servo.diagnostics())
         self._logger.info(
             "Controls: q/ESC quit | s toggle auto-sweep | [ left | ] right | c center"
         )
@@ -96,7 +100,8 @@ class IntegratedEdgeApp:
         self.webcam.stop()
         self.gas_sensor.stop()
         self.temp_sensor.stop()
-        cv2.destroyAllWindows()
+        if self.show_window:
+            cv2.destroyAllWindows()
 
     def _print_sensor_readings(self) -> None:
         now = time.time()
@@ -183,10 +188,11 @@ class IntegratedEdgeApp:
                         tick_interval_s=self.sweep_interval_s,
                     )
 
-                cv2.imshow("Edge Sensors + Vision + Servo", display_frame)
-                key = cv2.waitKey(1) & 0xFF
-                if not self._handle_key(key):
-                    break
+                if self.show_window:
+                    cv2.imshow("Edge Sensors + Vision + Servo", display_frame)
+                    key = cv2.waitKey(1) & 0xFF
+                    if not self._handle_key(key):
+                        break
         finally:
             self.stop()
 
@@ -205,6 +211,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sweep-step", type=int, default=35)
     parser.add_argument("--sweep-interval", type=float, default=0.1)
     parser.add_argument("--auto-sweep", action="store_true")
+    parser.add_argument("--headless", action="store_true")
     return parser.parse_args()
 
 
@@ -228,6 +235,7 @@ def main() -> None:
         sweep_step=args.sweep_step,
         sweep_interval_s=args.sweep_interval,
         auto_sweep=args.auto_sweep,
+        show_window=not args.headless,
     )
 
     def _handle_signal(signum: int, _frame: Any) -> None:

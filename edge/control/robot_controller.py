@@ -1,10 +1,13 @@
 import importlib
+import os
+import sys
 import time
+from pathlib import Path
 from typing import Any, Optional, Sequence
 
 
 DEFAULT_SERVO_ID = 9
-DEFAULT_CENTER_PULSE = 1000
+DEFAULT_CENTER_PULSE = 1500
 
 
 class CameraServoController:
@@ -31,19 +34,50 @@ class CameraServoController:
         self._current_pulse = self.center_pulse
         self._sweep_direction = 1
         self._last_sweep_ts = 0.0
+        self._module_attempts = []
+        self._path_injections = []
         self._load_driver()
 
     @staticmethod
-    def _safe_import(module_name: str) -> Optional[Any]:
+    def _safe_import(module_name: str) -> tuple[Optional[Any], Optional[str]]:
         try:
-            return importlib.import_module(module_name)
-        except Exception:
-            return None
+            return importlib.import_module(module_name), None
+        except Exception as exc:
+            return None, str(exc)
+
+    def _inject_candidate_paths(self) -> None:
+        candidate_paths = [
+            "/home/pi/PuppyPi",
+            "/home/pi/PuppyPi/HiwonderSDK",
+            "/home/pi/HiwonderSDK",
+            "/home/pi/puppypi",
+            "/home/pi/puppypi/HiwonderSDK",
+        ]
+        env_extra = os.getenv("PUPPYPI_SDK_PATH")
+        if env_extra:
+            candidate_paths.insert(0, env_extra)
+
+        for candidate in candidate_paths:
+            path = Path(candidate)
+            if not path.exists():
+                continue
+            resolved = str(path.resolve())
+            if resolved in sys.path:
+                continue
+            sys.path.insert(0, resolved)
+            self._path_injections.append(resolved)
 
     def _load_driver(self) -> None:
-        candidates: Sequence[str] = ("Board", "HiwonderSDK.Board", "hiwonder.Board")
+        self._inject_candidate_paths()
+        candidates: Sequence[str] = (
+            "Board",
+            "HiwonderSDK.Board",
+            "hiwonder.Board",
+            "SDK.Board",
+        )
         for module_name in candidates:
-            module = self._safe_import(module_name)
+            module, error = self._safe_import(module_name)
+            self._module_attempts.append((module_name, error))
             if module is None:
                 continue
 
@@ -128,3 +162,16 @@ class CameraServoController:
         if not self.is_available:
             return "No supported PuppyPi servo driver found"
         return f"{self._driver_name} ({self._mode}, id={self.servo_id})"
+
+    def diagnostics(self) -> dict:
+        return {
+            "driver": self.describe(),
+            "injected_paths": list(self._path_injections),
+            "module_attempts": [
+                {
+                    "module": module_name,
+                    "error": error,
+                }
+                for module_name, error in self._module_attempts
+            ],
+        }
