@@ -47,6 +47,10 @@ class FullEdgePipelineApp:
         disable_overlays: bool = False,
         render_every_n: int = 1,
         profile_perf: bool = False,
+        track_person: bool = False,
+        track_deadband_px: int = 24,
+        track_max_step: int = 18,
+        track_interval_s: float = 0.06,
         show_window: bool = True,
         auto_sweep: bool = False,
     ) -> None:
@@ -63,6 +67,10 @@ class FullEdgePipelineApp:
         self.disable_overlays = bool(disable_overlays)
         self.render_every_n = max(1, int(render_every_n))
         self.profile_perf = bool(profile_perf)
+        self.track_person = bool(track_person)
+        self.track_deadband_px = max(0, int(track_deadband_px))
+        self.track_max_step = max(1, int(track_max_step))
+        self.track_interval_s = max(0.02, float(track_interval_s))
         self.max_loop_fps = max(1.0, float(max_loop_fps))
         self.loop_min_period_s = 1.0 / self.max_loop_fps
 
@@ -115,6 +123,7 @@ class FullEdgePipelineApp:
         self._next_temp_due_ts = 0.0
         self._gas_poll_interval_s = 0.1
         self._temp_poll_interval_s = 1.0
+        self._last_track_ts = 0.0
 
     def start(self) -> None:
         self._running = True
@@ -138,6 +147,13 @@ class FullEdgePipelineApp:
             self.disable_inference,
             self.disable_overlays,
             self.render_every_n,
+        )
+        self._logger.info(
+            "Tracking: enabled=%s deadband_px=%s max_step=%s interval=%.2fs",
+            self.track_person,
+            self.track_deadband_px,
+            self.track_max_step,
+            self.track_interval_s,
         )
         if not self.vision.is_ready() and not self.disable_inference:
             self._logger.warning("Vision model unavailable: %s", self.vision.load_error)
@@ -179,6 +195,29 @@ class FullEdgePipelineApp:
             print(f"[TEMP] {p['temperature_c']:.2f} C | [HUM] {p['humidity_rh']:.2f} %RH")
         if self._last_gas is not None and "ppm" in self._last_gas.get("payload", {}):
             print(f"[GAS] {self._last_gas['payload']['ppm']:.2f} ppm")
+
+    def _track_first_person(self, detections: List[Dict[str, Any]], frame_width: int) -> None:
+        if not self.track_person or not detections:
+            return
+        now = time.time()
+        if now - self._last_track_ts < self.track_interval_s:
+            return
+        self._last_track_ts = now
+
+        target = detections[0]
+        x1, _, x2, _ = target["bbox"]
+        person_cx = int((x1 + x2) / 2)
+        frame_cx = int(frame_width / 2)
+        error_px = person_cx - frame_cx
+        if abs(error_px) <= self.track_deadband_px:
+            return
+
+        half_w = max(1, frame_width / 2.0)
+        error_norm = max(-1.0, min(1.0, error_px / half_w))
+        step = int(round(error_norm * self.track_max_step))
+        if step == 0:
+            step = 1 if error_norm > 0 else -1
+        self.servo.step(step, duration_ms=80)
 
     @staticmethod
     def _rescale_detections(
@@ -320,7 +359,10 @@ class FullEdgePipelineApp:
                     print("INTRUSION EVENT")
                     print(json.dumps(event, indent=2))
 
-                if self.auto_sweep:
+                tracking_active = self.track_person and len(detections) > 0
+                self._track_first_person(detections, frame_width=frame_w)
+
+                if self.auto_sweep and not tracking_active:
                     self.servo.sweep_tick(
                         left_pulse=500,
                         right_pulse=1500,
@@ -411,6 +453,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-overlays", action="store_true")
     parser.add_argument("--render-every-n", type=int, default=1)
     parser.add_argument("--profile-perf", action="store_true")
+    parser.add_argument("--track-person", action="store_true")
+    parser.add_argument("--track-deadband-px", type=int, default=24)
+    parser.add_argument("--track-max-step", type=int, default=18)
+    parser.add_argument("--track-interval", type=float, default=0.06)
     parser.add_argument("--auto-sweep", action="store_true")
     parser.add_argument("--headless", action="store_true")
     return parser.parse_args()
@@ -442,6 +488,10 @@ def main() -> None:
         disable_overlays=args.disable_overlays,
         render_every_n=args.render_every_n,
         profile_perf=args.profile_perf,
+        track_person=args.track_person,
+        track_deadband_px=args.track_deadband_px,
+        track_max_step=args.track_max_step,
+        track_interval_s=args.track_interval,
         show_window=not args.headless,
         auto_sweep=args.auto_sweep,
     )
