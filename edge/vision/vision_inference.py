@@ -17,10 +17,12 @@ class VisionInference:
         model_path: str = "yolov8n.pt",
         conf_threshold: float = 0.6,
         device: Optional[str] = None,
+        imgsz: int = 320,
     ) -> None:
         self.model_path = model_path
         self.conf_threshold = conf_threshold
         self.device = device
+        self.imgsz = int(imgsz)
         self.person_class_id = 0  # COCO class id for 'person'
         self.model = None
         self.load_error: Optional[str] = None
@@ -49,6 +51,9 @@ class VisionInference:
         kwargs = {"verbose": False}
         if self.device is not None:
             kwargs["device"] = self.device
+        kwargs["imgsz"] = self.imgsz
+        kwargs["classes"] = [self.person_class_id]
+        kwargs["max_det"] = 6
 
         results = self.model(frame, **kwargs)
         detections: List[Dict] = []

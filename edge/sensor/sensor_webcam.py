@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from pathlib import Path
 from collections import deque
@@ -63,11 +64,19 @@ class WebcamSensor:
 		return list(self.candidate_indices)
 
 	def _open_capture(self, index: int) -> Optional[Any]:
-		cap = cv2.VideoCapture(index)
+		if os.name != "nt":
+			cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+		else:
+			cap = cv2.VideoCapture(index)
 		if not cap.isOpened():
 			cap.release()
 			return None
 
+		# Demo-like low-latency settings for USB webcams on Linux.
+		if hasattr(cv2, "CAP_PROP_FOURCC"):
+			cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+		if hasattr(cv2, "CAP_PROP_BUFFERSIZE"):
+			cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 		cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
 		cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
 		cap.set(cv2.CAP_PROP_FPS, self.target_fps)

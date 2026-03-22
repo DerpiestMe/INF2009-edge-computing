@@ -43,6 +43,10 @@ class FullEdgePipelineApp:
         force_infer_interval_s: float = 1.2,
         max_loop_fps: float = 18.0,
         disable_motion_gate: bool = False,
+        disable_inference: bool = False,
+        disable_overlays: bool = False,
+        render_every_n: int = 1,
+        profile_perf: bool = False,
         show_window: bool = True,
         auto_sweep: bool = False,
     ) -> None:
@@ -55,6 +59,10 @@ class FullEdgePipelineApp:
         self.infer_interval_s = max(0.05, float(infer_interval_s))
         self.force_infer_interval_s = max(self.infer_interval_s, float(force_infer_interval_s))
         self.motion_gate = not bool(disable_motion_gate)
+        self.disable_inference = bool(disable_inference)
+        self.disable_overlays = bool(disable_overlays)
+        self.render_every_n = max(1, int(render_every_n))
+        self.profile_perf = bool(profile_perf)
         self.max_loop_fps = max(1.0, float(max_loop_fps))
         self.loop_min_period_s = 1.0 / self.max_loop_fps
 
@@ -62,7 +70,11 @@ class FullEdgePipelineApp:
         self.gas_sensor = GasSensor(candidate_ports=["/dev/ttyACM0", "/dev/ttyUSB0", "COM3", "COM4"])
         self.temp_sensor = TemperatureHumiditySensor(i2c_bus_index=1, i2c_address=0x38)
         self.motion = MotionDetector(blur_size=15, diff_threshold=24, min_area=1200)
-        self.vision = VisionInference(model_path=model_path, conf_threshold=confidence)
+        self.vision = VisionInference(
+            model_path=model_path,
+            conf_threshold=confidence,
+            imgsz=max(self.infer_width, self.infer_height),
+        )
         self.zones = ZoneManager()
         self.events = IntrusionEventManager(
             confirm_frames=4,
@@ -93,6 +105,9 @@ class FullEdgePipelineApp:
         self._infer_busy = False
         self._infer_stop = False
         self._infer_thread: Optional[threading.Thread] = None
+        self._loop_counter = 0
+        self._perf_last_log_ts = time.time()
+        self._perf_accum = {"capture_ms": 0.0, "motion_ms": 0.0, "overlay_ms": 0.0}
 
     def start(self) -> None:
         self._running = True
@@ -111,9 +126,15 @@ class FullEdgePipelineApp:
             self.motion_gate,
             self.max_loop_fps,
         )
-        if not self.vision.is_ready():
+        self._logger.info(
+            "Perf flags: disable_inference=%s, disable_overlays=%s, render_every_n=%s",
+            self.disable_inference,
+            self.disable_overlays,
+            self.render_every_n,
+        )
+        if not self.vision.is_ready() and not self.disable_inference:
             self._logger.warning("Vision model unavailable: %s", self.vision.load_error)
-        else:
+        elif not self.disable_inference:
             self._infer_thread = threading.Thread(target=self._inference_worker, daemon=True)
             self._infer_thread.start()
 
@@ -216,6 +237,7 @@ class FullEdgePipelineApp:
         try:
             while self._running:
                 loop_start = time.time()
+                t0 = time.time()
                 cam_record = self.webcam.read()
                 temp_record = self.temp_sensor.read()
                 gas_record = self.gas_sensor.read()
@@ -234,9 +256,14 @@ class FullEdgePipelineApp:
                 clean_frame = frame.copy()
                 display = frame.copy()
                 frame_h, frame_w = display.shape[:2]
+                capture_ms = (time.time() - t0) * 1000.0
+
+                t1 = time.time()
                 motion_result = self.motion.detect_motion(display)
-                self.motion.draw_motion_boxes(display, motion_result["motion_boxes"])
-                self.zones.draw_zones(display)
+                motion_ms = (time.time() - t1) * 1000.0
+                if not self.disable_overlays:
+                    self.motion.draw_motion_boxes(display, motion_result["motion_boxes"])
+                    self.zones.draw_zones(display)
 
                 now = time.time()
                 with self._infer_lock:
@@ -247,7 +274,7 @@ class FullEdgePipelineApp:
                 allow_infer = (not self.motion_gate) or motion_result["motion"] or force_due
 
                 detections: List[Dict[str, Any]]
-                if self.vision.is_ready() and infer_due and allow_infer and not infer_busy:
+                if (not self.disable_inference) and self.vision.is_ready() and infer_due and allow_infer and not infer_busy:
                     infer_frame = cv2.resize(clean_frame, (self.infer_width, self.infer_height))
                     with self._infer_lock:
                         self._infer_input = {
@@ -265,7 +292,10 @@ class FullEdgePipelineApp:
                 else:
                     self._inference_reused = True
 
-                self.vision.draw_detections(display, detections)
+                t2 = time.time()
+                if not self.disable_overlays:
+                    self.vision.draw_detections(display, detections)
+                overlay_ms = (time.time() - t2) * 1000.0
 
                 # Save clean snapshots (no overlays) for downstream cloud inferencing.
                 event = self.events.process(clean_frame, detections)
@@ -308,11 +338,31 @@ class FullEdgePipelineApp:
                     2,
                 )
 
-                if self.show_window:
+                self._loop_counter += 1
+                if self.show_window and (self._loop_counter % self.render_every_n == 0):
                     cv2.imshow("Edge Full Pipeline", display)
                     key = cv2.waitKey(1) & 0xFF
                     if not self._handle_key(key):
                         break
+                elif self.show_window:
+                    cv2.waitKey(1)
+
+                if self.profile_perf:
+                    self._perf_accum["capture_ms"] += capture_ms
+                    self._perf_accum["motion_ms"] += motion_ms
+                    self._perf_accum["overlay_ms"] += overlay_ms
+                    now_perf = time.time()
+                    if now_perf - self._perf_last_log_ts >= 2.0 and self._loop_counter > 0:
+                        n = float(self._loop_counter)
+                        self._logger.info(
+                            "Perf breakdown avg(ms): capture=%.1f motion=%.1f overlay=%.1f",
+                            self._perf_accum["capture_ms"] / n,
+                            self._perf_accum["motion_ms"] / n,
+                            self._perf_accum["overlay_ms"] / n,
+                        )
+                        self._loop_counter = 0
+                        self._perf_accum = {"capture_ms": 0.0, "motion_ms": 0.0, "overlay_ms": 0.0}
+                        self._perf_last_log_ts = now_perf
 
                 elapsed = time.time() - loop_start
                 sleep_for = self.loop_min_period_s - elapsed
@@ -338,6 +388,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--force-infer-interval", type=float, default=1.2)
     parser.add_argument("--max-loop-fps", type=float, default=18.0)
     parser.add_argument("--disable-motion-gate", action="store_true")
+    parser.add_argument("--disable-inference", action="store_true")
+    parser.add_argument("--disable-overlays", action="store_true")
+    parser.add_argument("--render-every-n", type=int, default=1)
+    parser.add_argument("--profile-perf", action="store_true")
     parser.add_argument("--auto-sweep", action="store_true")
     parser.add_argument("--headless", action="store_true")
     return parser.parse_args()
@@ -365,6 +419,10 @@ def main() -> None:
         force_infer_interval_s=args.force_infer_interval,
         max_loop_fps=args.max_loop_fps,
         disable_motion_gate=args.disable_motion_gate,
+        disable_inference=args.disable_inference,
+        disable_overlays=args.disable_overlays,
+        render_every_n=args.render_every_n,
+        profile_perf=args.profile_perf,
         show_window=not args.headless,
         auto_sweep=args.auto_sweep,
     )
