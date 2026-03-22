@@ -32,7 +32,7 @@ class FullEdgePipelineApp:
         camera_index: int = 2,
         width: int = 640,
         height: int = 480,
-        fps: float = 10.0,
+        fps: float = 30.0,
         model_path: str = "yolov8n.pt",
         confidence: float = 0.6,
         servo_id: int = 9,
@@ -67,7 +67,10 @@ class FullEdgePipelineApp:
         self.loop_min_period_s = 1.0 / self.max_loop_fps
 
         self.webcam = WebcamSensor(device_index=camera_index, width=width, height=height, target_fps=fps)
-        self.gas_sensor = GasSensor(candidate_ports=["/dev/ttyACM0", "/dev/ttyUSB0", "COM3", "COM4"])
+        self.gas_sensor = GasSensor(
+            candidate_ports=["/dev/ttyACM0", "/dev/ttyUSB0", "COM3", "COM4"],
+            read_timeout=0.02,
+        )
         self.temp_sensor = TemperatureHumiditySensor(i2c_bus_index=1, i2c_address=0x38)
         self.motion = MotionDetector(blur_size=15, diff_threshold=24, min_area=1200)
         self.vision = VisionInference(
@@ -107,7 +110,11 @@ class FullEdgePipelineApp:
         self._infer_thread: Optional[threading.Thread] = None
         self._loop_counter = 0
         self._perf_last_log_ts = time.time()
-        self._perf_accum = {"capture_ms": 0.0, "motion_ms": 0.0, "overlay_ms": 0.0}
+        self._perf_accum = {"capture_ms": 0.0, "sensor_ms": 0.0, "motion_ms": 0.0, "overlay_ms": 0.0}
+        self._next_gas_due_ts = 0.0
+        self._next_temp_due_ts = 0.0
+        self._gas_poll_interval_s = 0.1
+        self._temp_poll_interval_s = 1.0
 
     def start(self) -> None:
         self._running = True
@@ -239,13 +246,6 @@ class FullEdgePipelineApp:
                 loop_start = time.time()
                 t0 = time.time()
                 cam_record = self.webcam.read()
-                temp_record = self.temp_sensor.read()
-                gas_record = self.gas_sensor.read()
-                if temp_record is not None:
-                    self._last_temp = temp_record
-                if gas_record is not None:
-                    self._last_gas = gas_record
-                self._print_sensor_lines()
 
                 latest = self.webcam.get_latest_frame()
                 if latest is None:
@@ -257,6 +257,23 @@ class FullEdgePipelineApp:
                 display = frame.copy()
                 frame_h, frame_w = display.shape[:2]
                 capture_ms = (time.time() - t0) * 1000.0
+
+                t_sensor = time.time()
+                now_sensor = time.time()
+                if now_sensor >= self._next_temp_due_ts:
+                    temp_record = self.temp_sensor.read()
+                    if temp_record is not None:
+                        self._last_temp = temp_record
+                    self._next_temp_due_ts = now_sensor + self._temp_poll_interval_s
+
+                if now_sensor >= self._next_gas_due_ts:
+                    gas_record = self.gas_sensor.read()
+                    if gas_record is not None:
+                        self._last_gas = gas_record
+                    self._next_gas_due_ts = now_sensor + self._gas_poll_interval_s
+
+                self._print_sensor_lines()
+                sensor_ms = (time.time() - t_sensor) * 1000.0
 
                 t1 = time.time()
                 motion_result = self.motion.detect_motion(display)
@@ -349,19 +366,21 @@ class FullEdgePipelineApp:
 
                 if self.profile_perf:
                     self._perf_accum["capture_ms"] += capture_ms
+                    self._perf_accum["sensor_ms"] += sensor_ms
                     self._perf_accum["motion_ms"] += motion_ms
                     self._perf_accum["overlay_ms"] += overlay_ms
                     now_perf = time.time()
                     if now_perf - self._perf_last_log_ts >= 2.0 and self._loop_counter > 0:
                         n = float(self._loop_counter)
                         self._logger.info(
-                            "Perf breakdown avg(ms): capture=%.1f motion=%.1f overlay=%.1f",
+                            "Perf breakdown avg(ms): capture=%.1f sensor=%.1f motion=%.1f overlay=%.1f",
                             self._perf_accum["capture_ms"] / n,
+                            self._perf_accum["sensor_ms"] / n,
                             self._perf_accum["motion_ms"] / n,
                             self._perf_accum["overlay_ms"] / n,
                         )
                         self._loop_counter = 0
-                        self._perf_accum = {"capture_ms": 0.0, "motion_ms": 0.0, "overlay_ms": 0.0}
+                        self._perf_accum = {"capture_ms": 0.0, "sensor_ms": 0.0, "motion_ms": 0.0, "overlay_ms": 0.0}
                         self._perf_last_log_ts = now_perf
 
                 elapsed = time.time() - loop_start
@@ -377,7 +396,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-index", type=int, default=2)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
-    parser.add_argument("--fps", type=float, default=10.0)
+    parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--model-path", default="yolov8n.pt")
     parser.add_argument("--confidence", type=float, default=0.6)
     parser.add_argument("--servo-id", type=int, default=9)
