@@ -37,6 +37,7 @@ class FullEdgePipelineApp:
         confidence: float = 0.6,
         servo_id: int = 9,
         servo_mode: str = "pwm",
+        servo_direction: int = -1,
         infer_width: int = 320,
         infer_height: int = 240,
         infer_interval_s: float = 0.25,
@@ -58,6 +59,7 @@ class FullEdgePipelineApp:
         self._running = False
         self.show_window = show_window
         self.auto_sweep = auto_sweep
+        self.servo_direction = -1 if int(servo_direction) < 0 else 1
         self.infer_width = max(64, int(infer_width))
         self.infer_height = max(64, int(infer_height))
         self.infer_interval_s = max(0.05, float(infer_interval_s))
@@ -155,6 +157,7 @@ class FullEdgePipelineApp:
             self.track_max_step,
             self.track_interval_s,
         )
+        self._logger.info("Servo direction multiplier: %s", self.servo_direction)
         if not self.vision.is_ready() and not self.disable_inference:
             self._logger.warning("Vision model unavailable: %s", self.vision.load_error)
         elif not self.disable_inference:
@@ -178,9 +181,9 @@ class FullEdgePipelineApp:
         if key == ord("s"):
             self.auto_sweep = not self.auto_sweep
         elif key == ord("["):
-            self.servo.step(-20)
+            self.servo.step(-20 * self.servo_direction)
         elif key == ord("]"):
-            self.servo.step(20)
+            self.servo.step(20 * self.servo_direction)
         elif key == ord("c"):
             self.servo.center()
         return True
@@ -217,7 +220,7 @@ class FullEdgePipelineApp:
         step = int(round(error_norm * self.track_max_step))
         if step == 0:
             step = 1 if error_norm > 0 else -1
-        self.servo.step(step, duration_ms=80)
+        self.servo.step(step * self.servo_direction, duration_ms=80)
 
     @staticmethod
     def _rescale_detections(
@@ -443,6 +446,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--confidence", type=float, default=0.6)
     parser.add_argument("--servo-id", type=int, default=9)
     parser.add_argument("--servo-mode", choices=["auto", "pwm", "bus"], default="pwm")
+    parser.add_argument("--servo-direction", type=int, choices=[-1, 1], default=-1)
     parser.add_argument("--infer-width", type=int, default=320)
     parser.add_argument("--infer-height", type=int, default=240)
     parser.add_argument("--infer-interval", type=float, default=0.25)
@@ -478,6 +482,7 @@ def main() -> None:
         confidence=args.confidence,
         servo_id=args.servo_id,
         servo_mode=args.servo_mode,
+        servo_direction=args.servo_direction,
         infer_width=args.infer_width,
         infer_height=args.infer_height,
         infer_interval_s=args.infer_interval,

@@ -33,6 +33,7 @@ class IntegratedEdgeApp:
         confidence: float = 0.6,
         servo_id: int = 9,
         servo_mode: str = "pwm",
+        servo_direction: int = -1,
         sweep_left: int = 500,
         sweep_right: int = 1500,
         sweep_step: int = 15,
@@ -90,6 +91,7 @@ class IntegratedEdgeApp:
         self.sweep_right = sweep_right
         self.sweep_step = sweep_step
         self.sweep_interval_s = sweep_interval_s
+        self.servo_direction = -1 if int(servo_direction) < 0 else 1
         self.infer_width = max(64, int(infer_width))
         self.infer_height = max(64, int(infer_height))
         self.infer_interval_s = max(0.05, float(infer_interval_s))
@@ -127,6 +129,7 @@ class IntegratedEdgeApp:
         self._logger.info(
             "Controls: q/ESC quit | s toggle auto-sweep | [ left | ] right | c center"
         )
+        self._logger.info("Servo direction multiplier: %s", self.servo_direction)
         self._logger.info(
             "Perf: infer %sx%s every %.2fs, motion_gate=%s, max_loop_fps=%.1f",
             self.infer_width,
@@ -187,9 +190,9 @@ class IntegratedEdgeApp:
             self.auto_sweep = not self.auto_sweep
             self._logger.info("Auto sweep set to %s", self.auto_sweep)
         elif key == ord("["):
-            self.servo.step(-self.sweep_step, duration_ms=120)
+            self.servo.step(-self.sweep_step * self.servo_direction, duration_ms=120)
         elif key == ord("]"):
-            self.servo.step(self.sweep_step, duration_ms=120)
+            self.servo.step(self.sweep_step * self.servo_direction, duration_ms=120)
         elif key == ord("c"):
             self.servo.center(duration_ms=200)
         return True
@@ -281,7 +284,7 @@ class IntegratedEdgeApp:
                     self.servo.sweep_tick(
                         left_pulse=self.sweep_left,
                         right_pulse=self.sweep_right,
-                        step_pulse=self.sweep_step,
+                        step_pulse=self.sweep_step * self.servo_direction,
                         tick_interval_s=self.sweep_interval_s,
                     )
 
@@ -320,6 +323,7 @@ def parse_args() -> argparse.Namespace:
         default="pwm",
         help="Servo control mode preference for supported SDKs",
     )
+    parser.add_argument("--servo-direction", type=int, choices=[-1, 1], default=-1)
     parser.add_argument("--sweep-left", type=int, default=500)
     parser.add_argument("--sweep-right", type=int, default=1500)
     parser.add_argument("--sweep-step", type=int, default=15)
@@ -354,6 +358,7 @@ def main() -> None:
         confidence=args.confidence,
         servo_id=args.servo_id,
         servo_mode=args.servo_mode,
+        servo_direction=args.servo_direction,
         sweep_left=args.sweep_left,
         sweep_right=args.sweep_right,
         sweep_step=args.sweep_step,
