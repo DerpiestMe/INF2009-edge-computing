@@ -3,6 +3,7 @@ import json
 import logging
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -84,8 +85,14 @@ class FullEdgePipelineApp:
         self._infer_fps_ema = 0.0
         self._last_loop_ts = time.time()
         self._last_infer_ts = 0.0
+        self._last_presented_infer_ts = 0.0
         self._last_detections: List[Dict[str, Any]] = []
         self._inference_reused = False
+        self._infer_lock = threading.Lock()
+        self._infer_input: Optional[Dict[str, Any]] = None
+        self._infer_busy = False
+        self._infer_stop = False
+        self._infer_thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
         self._running = True
@@ -106,9 +113,15 @@ class FullEdgePipelineApp:
         )
         if not self.vision.is_ready():
             self._logger.warning("Vision model unavailable: %s", self.vision.load_error)
+        else:
+            self._infer_thread = threading.Thread(target=self._inference_worker, daemon=True)
+            self._infer_thread.start()
 
     def stop(self) -> None:
         self._running = False
+        self._infer_stop = True
+        if self._infer_thread is not None:
+            self._infer_thread.join(timeout=1.0)
         self.webcam.stop()
         self.gas_sensor.stop()
         self.temp_sensor.stop()
@@ -159,6 +172,45 @@ class FullEdgePipelineApp:
             scaled.append(out)
         return scaled
 
+    def _inference_worker(self) -> None:
+        while not self._infer_stop:
+            payload: Optional[Dict[str, Any]] = None
+            with self._infer_lock:
+                if self._infer_input is not None and not self._infer_busy:
+                    payload = self._infer_input
+                    self._infer_input = None
+                    self._infer_busy = True
+
+            if payload is None:
+                time.sleep(0.005)
+                continue
+
+            try:
+                infer_frame = payload["infer_frame"]
+                dst_width = payload["dst_width"]
+                dst_height = payload["dst_height"]
+                det_small = self.vision.detect_persons(infer_frame)
+                detections = self._rescale_detections(
+                    det_small,
+                    src_width=self.infer_width,
+                    src_height=self.infer_height,
+                    dst_width=dst_width,
+                    dst_height=dst_height,
+                )
+                detections = self.zones.annotate_detections_with_zone(detections)
+                infer_ts = payload["ts"]
+                with self._infer_lock:
+                    prev_infer_ts = self._last_infer_ts
+                dt_infer = max(1e-6, infer_ts - prev_infer_ts) if prev_infer_ts > 0 else self.infer_interval_s
+                inst_infer_fps = 1.0 / dt_infer
+                with self._infer_lock:
+                    self._last_detections = detections
+                    self._infer_fps_ema = inst_infer_fps if self._infer_fps_ema == 0.0 else (0.85 * self._infer_fps_ema + 0.15 * inst_infer_fps)
+                    self._last_infer_ts = infer_ts
+            finally:
+                with self._infer_lock:
+                    self._infer_busy = False
+
     def run_forever(self) -> None:
         self.start()
         try:
@@ -179,6 +231,7 @@ class FullEdgePipelineApp:
                     continue
 
                 _, _, frame = latest
+                clean_frame = frame.copy()
                 display = frame.copy()
                 frame_h, frame_w = display.shape[:2]
                 motion_result = self.motion.detect_motion(display)
@@ -186,35 +239,36 @@ class FullEdgePipelineApp:
                 self.zones.draw_zones(display)
 
                 now = time.time()
-                infer_due = (now - self._last_infer_ts) >= self.infer_interval_s
-                force_due = (now - self._last_infer_ts) >= self.force_infer_interval_s
+                with self._infer_lock:
+                    last_infer_ts = self._last_infer_ts
+                    infer_busy = self._infer_busy
+                infer_due = (now - last_infer_ts) >= self.infer_interval_s
+                force_due = (now - last_infer_ts) >= self.force_infer_interval_s
                 allow_infer = (not self.motion_gate) or motion_result["motion"] or force_due
 
                 detections: List[Dict[str, Any]]
-                if self.vision.is_ready() and infer_due and allow_infer:
-                    infer_frame = cv2.resize(display, (self.infer_width, self.infer_height))
-                    det_small = self.vision.detect_persons(infer_frame)
-                    detections = self._rescale_detections(
-                        det_small,
-                        src_width=self.infer_width,
-                        src_height=self.infer_height,
-                        dst_width=frame_w,
-                        dst_height=frame_h,
-                    )
-                    detections = self.zones.annotate_detections_with_zone(detections)
-                    self._last_detections = detections
-                    dt_infer = max(1e-6, now - self._last_infer_ts) if self._last_infer_ts > 0 else self.infer_interval_s
-                    inst_infer_fps = 1.0 / dt_infer
-                    self._infer_fps_ema = inst_infer_fps if self._infer_fps_ema == 0.0 else (0.85 * self._infer_fps_ema + 0.15 * inst_infer_fps)
-                    self._last_infer_ts = now
+                if self.vision.is_ready() and infer_due and allow_infer and not infer_busy:
+                    infer_frame = cv2.resize(clean_frame, (self.infer_width, self.infer_height))
+                    with self._infer_lock:
+                        self._infer_input = {
+                            "infer_frame": infer_frame,
+                            "dst_width": frame_w,
+                            "dst_height": frame_h,
+                            "ts": now,
+                        }
+                with self._infer_lock:
+                    detections = list(self._last_detections)
+                    latest_infer_ts = self._last_infer_ts
+                if latest_infer_ts > self._last_presented_infer_ts:
                     self._inference_reused = False
+                    self._last_presented_infer_ts = latest_infer_ts
                 else:
-                    detections = self._last_detections
                     self._inference_reused = True
 
                 self.vision.draw_detections(display, detections)
 
-                event = self.events.process(display, detections)
+                # Save clean snapshots (no overlays) for downstream cloud inferencing.
+                event = self.events.process(clean_frame, detections)
                 if event:
                     print("INTRUSION EVENT")
                     print(json.dumps(event, indent=2))
