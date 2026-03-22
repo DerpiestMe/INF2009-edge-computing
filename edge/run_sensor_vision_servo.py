@@ -4,7 +4,7 @@ import signal
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import cv2
 
@@ -16,6 +16,7 @@ from edge.control.robot_controller import CameraServoController
 from edge.sensor.sensor_gas import GasSensor
 from edge.sensor.sensor_temp import TemperatureHumiditySensor
 from edge.sensor.sensor_webcam import WebcamSensor
+from edge.vision.motion_detector import MotionDetector
 from edge.vision.vision_inference import VisionInference
 
 
@@ -32,10 +33,19 @@ class IntegratedEdgeApp:
         confidence: float = 0.6,
         servo_id: int = 9,
         servo_mode: str = "pwm",
-        sweep_left: int = 1100,
-        sweep_right: int = 1900,
-        sweep_step: int = 35,
-        sweep_interval_s: float = 0.1,
+        sweep_left: int = 500,
+        sweep_right: int = 1500,
+        sweep_step: int = 15,
+        sweep_interval_s: float = 0.12,
+        servo_min_pulse: int = 500,
+        servo_max_pulse: int = 1500,
+        servo_center_pulse: int = 1000,
+        infer_width: int = 320,
+        infer_height: int = 240,
+        infer_interval_s: float = 0.25,
+        force_infer_interval_s: float = 1.2,
+        motion_gate: bool = True,
+        max_loop_fps: float = 18.0,
         auto_sweep: bool = False,
         show_window: bool = True,
     ) -> None:
@@ -66,12 +76,27 @@ class IntegratedEdgeApp:
             buffer_size=100,
         )
         self.vision = VisionInference(model_path=model_path, conf_threshold=confidence)
-        self.servo = CameraServoController(servo_id=servo_id, servo_mode=servo_mode)
+        self.motion_detector = MotionDetector(blur_size=15, diff_threshold=24, min_area=1200)
+        self.servo = CameraServoController(
+            servo_id=servo_id,
+            servo_mode=servo_mode,
+            min_pulse=servo_min_pulse,
+            max_pulse=servo_max_pulse,
+            center_pulse=servo_center_pulse,
+            default_duration_ms=180,
+        )
 
         self.sweep_left = sweep_left
         self.sweep_right = sweep_right
         self.sweep_step = sweep_step
         self.sweep_interval_s = sweep_interval_s
+        self.infer_width = max(64, int(infer_width))
+        self.infer_height = max(64, int(infer_height))
+        self.infer_interval_s = max(0.05, float(infer_interval_s))
+        self.force_infer_interval_s = max(self.infer_interval_s, float(force_infer_interval_s))
+        self.motion_gate = bool(motion_gate)
+        self.max_loop_fps = max(1.0, float(max_loop_fps))
+        self.loop_min_period_s = 1.0 / self.max_loop_fps
         self.auto_sweep = auto_sweep
         self.show_window = show_window
 
@@ -79,6 +104,13 @@ class IntegratedEdgeApp:
         self._last_gas_record: Optional[Dict[str, Any]] = None
         self._last_print_temp_ts = 0.0
         self._last_print_gas_ts = 0.0
+        self._last_detections: List[Dict[str, Any]] = []
+        self._last_infer_ts = 0.0
+        self._last_loop_ts = time.time()
+        self._fps_ema = 0.0
+        self._infer_fps_ema = 0.0
+        self._inference_reused = False
+        self._motion_active = False
 
     def start(self) -> None:
         self._running = True
@@ -94,6 +126,14 @@ class IntegratedEdgeApp:
             self._logger.warning("Servo diagnostics: %s", self.servo.diagnostics())
         self._logger.info(
             "Controls: q/ESC quit | s toggle auto-sweep | [ left | ] right | c center"
+        )
+        self._logger.info(
+            "Perf: infer %sx%s every %.2fs, motion_gate=%s, max_loop_fps=%.1f",
+            self.infer_width,
+            self.infer_height,
+            self.infer_interval_s,
+            self.motion_gate,
+            self.max_loop_fps,
         )
 
     def stop(self) -> None:
@@ -127,9 +167,10 @@ class IntegratedEdgeApp:
         camera_status: str,
         person_count: int,
     ) -> None:
+        infer_mode = "reuse" if self._inference_reused else "fresh"
         lines = [
-            f"Camera: {camera_status}",
-            f"Persons: {person_count}",
+            f"Camera: {camera_status} | FPS: {self._fps_ema:.1f} | InferFPS: {self._infer_fps_ema:.1f}",
+            f"Persons: {person_count} | Motion: {self._motion_active} | Infer: {infer_mode}",
             f"Servo: {self.servo.describe()}",
             f"Servo pulse: {self.servo.current_pulse} | Auto sweep: {self.auto_sweep}",
             "Keys: q/ESC quit | s toggle sweep | [ left | ] right | c center",
@@ -153,10 +194,36 @@ class IntegratedEdgeApp:
             self.servo.center(duration_ms=200)
         return True
 
+    @staticmethod
+    def _rescale_detections(
+        detections: List[Dict[str, Any]],
+        src_width: int,
+        src_height: int,
+        dst_width: int,
+        dst_height: int,
+    ) -> List[Dict[str, Any]]:
+        if src_width <= 0 or src_height <= 0:
+            return detections
+        sx = float(dst_width) / float(src_width)
+        sy = float(dst_height) / float(src_height)
+        scaled: List[Dict[str, Any]] = []
+        for det in detections:
+            x1, y1, x2, y2 = det["bbox"]
+            scaled_det = det.copy()
+            scaled_det["bbox"] = [
+                int(x1 * sx),
+                int(y1 * sy),
+                int(x2 * sx),
+                int(y2 * sy),
+            ]
+            scaled.append(scaled_det)
+        return scaled
+
     def run_forever(self) -> None:
         self.start()
         try:
             while self._running:
+                loop_start = time.time()
                 camera_record = self.webcam.read()
                 camera_status = camera_record["status"] if camera_record else "unknown"
 
@@ -177,7 +244,36 @@ class IntegratedEdgeApp:
 
                 _, _, frame = latest
                 display_frame = frame.copy()
-                detections = self.vision.detect_persons(display_frame) if self.vision.is_ready() else []
+                frame_h, frame_w = display_frame.shape[:2]
+
+                motion_result = self.motion_detector.detect_motion(display_frame)
+                self._motion_active = bool(motion_result["motion"])
+
+                now = time.time()
+                infer_due = (now - self._last_infer_ts) >= self.infer_interval_s
+                force_due = (now - self._last_infer_ts) >= self.force_infer_interval_s
+                allow_infer = (not self.motion_gate) or self._motion_active or force_due
+
+                if self.vision.is_ready() and infer_due and allow_infer:
+                    infer_frame = cv2.resize(display_frame, (self.infer_width, self.infer_height))
+                    detections_small = self.vision.detect_persons(infer_frame)
+                    detections = self._rescale_detections(
+                        detections_small,
+                        src_width=self.infer_width,
+                        src_height=self.infer_height,
+                        dst_width=frame_w,
+                        dst_height=frame_h,
+                    )
+                    self._last_detections = detections
+                    dt_infer = max(1e-6, now - self._last_infer_ts) if self._last_infer_ts > 0 else self.infer_interval_s
+                    inst_infer_fps = 1.0 / dt_infer
+                    self._infer_fps_ema = inst_infer_fps if self._infer_fps_ema == 0.0 else (0.85 * self._infer_fps_ema + 0.15 * inst_infer_fps)
+                    self._last_infer_ts = now
+                    self._inference_reused = False
+                else:
+                    detections = self._last_detections
+                    self._inference_reused = True
+
                 self.vision.draw_detections(display_frame, detections)
                 self._annotate_overlay(display_frame, camera_status=camera_status, person_count=len(detections))
 
@@ -194,6 +290,17 @@ class IntegratedEdgeApp:
                     key = cv2.waitKey(1) & 0xFF
                     if not self._handle_key(key):
                         break
+
+                loop_end = time.time()
+                loop_dt = max(1e-6, loop_end - self._last_loop_ts)
+                inst_fps = 1.0 / loop_dt
+                self._fps_ema = inst_fps if self._fps_ema == 0.0 else (0.9 * self._fps_ema + 0.1 * inst_fps)
+                self._last_loop_ts = loop_end
+
+                elapsed = loop_end - loop_start
+                sleep_for = self.loop_min_period_s - elapsed
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
         finally:
             self.stop()
 
@@ -213,10 +320,19 @@ def parse_args() -> argparse.Namespace:
         default="pwm",
         help="Servo control mode preference for supported SDKs",
     )
-    parser.add_argument("--sweep-left", type=int, default=1100)
-    parser.add_argument("--sweep-right", type=int, default=1900)
-    parser.add_argument("--sweep-step", type=int, default=35)
-    parser.add_argument("--sweep-interval", type=float, default=0.1)
+    parser.add_argument("--sweep-left", type=int, default=500)
+    parser.add_argument("--sweep-right", type=int, default=1500)
+    parser.add_argument("--sweep-step", type=int, default=15)
+    parser.add_argument("--sweep-interval", type=float, default=0.12)
+    parser.add_argument("--servo-min-pulse", type=int, default=500)
+    parser.add_argument("--servo-max-pulse", type=int, default=1500)
+    parser.add_argument("--servo-center-pulse", type=int, default=1000)
+    parser.add_argument("--infer-width", type=int, default=320)
+    parser.add_argument("--infer-height", type=int, default=240)
+    parser.add_argument("--infer-interval", type=float, default=0.25)
+    parser.add_argument("--force-infer-interval", type=float, default=1.2)
+    parser.add_argument("--disable-motion-gate", action="store_true")
+    parser.add_argument("--max-loop-fps", type=float, default=18.0)
     parser.add_argument("--auto-sweep", action="store_true")
     parser.add_argument("--headless", action="store_true")
     return parser.parse_args()
@@ -242,6 +358,15 @@ def main() -> None:
         sweep_right=args.sweep_right,
         sweep_step=args.sweep_step,
         sweep_interval_s=args.sweep_interval,
+        servo_min_pulse=args.servo_min_pulse,
+        servo_max_pulse=args.servo_max_pulse,
+        servo_center_pulse=args.servo_center_pulse,
+        infer_width=args.infer_width,
+        infer_height=args.infer_height,
+        infer_interval_s=args.infer_interval,
+        force_infer_interval_s=args.force_infer_interval,
+        motion_gate=not args.disable_motion_gate,
+        max_loop_fps=args.max_loop_fps,
         auto_sweep=args.auto_sweep,
         show_window=not args.headless,
     )

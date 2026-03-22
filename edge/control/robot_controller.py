@@ -7,7 +7,7 @@ from typing import Any, Optional, Sequence
 
 
 DEFAULT_SERVO_ID = 9
-DEFAULT_CENTER_PULSE = 1500
+DEFAULT_CENTER_PULSE = 1000
 
 
 class CameraServoController:
@@ -18,7 +18,7 @@ class CameraServoController:
         servo_id: int = DEFAULT_SERVO_ID,
         servo_mode: str = "auto",
         min_pulse: int = 500,
-        max_pulse: int = 2500,
+        max_pulse: int = 1500,
         center_pulse: int = DEFAULT_CENTER_PULSE,
         default_duration_ms: int = 200,
     ) -> None:
