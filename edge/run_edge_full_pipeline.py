@@ -35,7 +35,7 @@ class FullEdgePipelineApp:
         height: int = 480,
         fps: float = 30.0,
         model_path: str = "yolov8n.pt",
-        confidence: float = 0.6,
+        confidence: float = 0.4,
         servo_id: int = 9,
         servo_mode: str = "pwm",
         servo_direction: int = -1,
@@ -44,7 +44,7 @@ class FullEdgePipelineApp:
         infer_interval_s: float = 0.25,
         force_infer_interval_s: float = 1.2,
         max_loop_fps: float = 18.0,
-        disable_motion_gate: bool = False,
+        disable_motion_gate: bool = True,
         disable_inference: bool = False,
         disable_overlays: bool = False,
         render_every_n: int = 1,
@@ -56,8 +56,8 @@ class FullEdgePipelineApp:
         enable_mobility: bool = False,
         approach_on_detect: bool = False,
         approach_close_bbox_height_px: int = 180,
-        teleop_speed_x: float = 10.0,
-        teleop_yaw_deg_s: float = 25.0,
+        teleop_speed_x: float = 5.0,
+        teleop_yaw_deg_s: float = 12.0,
         teleop_hold_timeout_s: float = 0.18,
         wrist_servo_id: int = 10,
         wrist_start_pulse: int = 1100,
@@ -552,16 +552,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--model-path", default="yolov8n.pt")
-    parser.add_argument("--confidence", type=float, default=0.6)
+    parser.add_argument("--confidence", type=float, default=0.4)
     parser.add_argument("--servo-id", type=int, default=9)
     parser.add_argument("--servo-mode", choices=["auto", "pwm", "bus"], default="pwm")
     parser.add_argument("--servo-direction", type=int, choices=[-1, 1], default=-1)
     parser.add_argument("--infer-width", type=int, default=320)
     parser.add_argument("--infer-height", type=int, default=240)
     parser.add_argument("--infer-interval", type=float, default=0.25)
-    parser.add_argument("--force-infer-interval", type=float, default=1.2)
+    parser.add_argument("--force-infer-interval", type=float, default=0.8)
     parser.add_argument("--max-loop-fps", type=float, default=18.0)
-    parser.add_argument("--disable-motion-gate", action="store_true")
+    parser.add_argument("--disable-motion-gate", action="store_true", dest="disable_motion_gate")
+    parser.add_argument("--enable-motion-gate", action="store_false", dest="disable_motion_gate")
     parser.add_argument("--disable-inference", action="store_true")
     parser.add_argument("--disable-overlays", action="store_true")
     parser.add_argument("--render-every-n", type=int, default=1)
@@ -573,14 +574,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable-mobility", action="store_true")
     parser.add_argument("--approach-on-detect", action="store_true")
     parser.add_argument("--approach-close-bbox-height", type=int, default=180)
-    parser.add_argument("--teleop-speed-x", type=float, default=10.0)
-    parser.add_argument("--teleop-yaw-deg-s", type=float, default=25.0)
+    parser.add_argument("--teleop-speed-x", type=float, default=5.0)
+    parser.add_argument("--teleop-yaw-deg-s", type=float, default=12.0)
     parser.add_argument("--teleop-hold-timeout", type=float, default=0.18)
     parser.add_argument("--wrist-servo-id", type=int, default=10)
     parser.add_argument("--wrist-start-pulse", type=int, default=1100)
     parser.add_argument("--disable-wrist-on-start", action="store_true")
     parser.add_argument("--auto-sweep", action="store_true")
     parser.add_argument("--headless", action="store_true")
+    parser.set_defaults(disable_motion_gate=True)
     return parser.parse_args()
 
 

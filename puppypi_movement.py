@@ -112,7 +112,7 @@ class PuppyPiMovementController:
     def _publish_default_pose_and_gait(self) -> None:
         if not self._ready and self._rospy is None:
             return
-        # Values derived from puppy_demo.py (Walk gait defaults).
+        # Conservative walk profile for better stability on uneven floors.
         pose = {
             "stance_x": 0.0,
             "stance_y": 0.0,
@@ -124,10 +124,10 @@ class PuppyPiMovementController:
             "run_time": 500,
         }
         gait = {
-            "overlap_time": 0.1,
-            "swing_time": 0.2,
-            "clearance_time": 0.3,
-            "z_clearance": 5.0,
+            "overlap_time": 0.15,
+            "swing_time": 0.28,
+            "clearance_time": 0.35,
+            "z_clearance": 4.0,
         }
         try:
             self._pose_pub.publish(**pose)
@@ -202,7 +202,7 @@ class PuppyPiMovementController:
         frame_width: int,
         frame_height: int,
         close_bbox_height_px: int = 180,
-        max_forward_cm_s: float = 10.0,
+        max_forward_cm_s: float = 6.0,
     ) -> bool:
         """
         Orient and approach person until close enough.
@@ -224,6 +224,6 @@ class PuppyPiMovementController:
             return True
 
         # Slow approach while turning to center target.
-        forward = max(2.0, min(max_forward_cm_s, (1.0 - abs(error_norm)) * max_forward_cm_s))
+        forward = max(1.0, min(max_forward_cm_s, (1.0 - abs(error_norm)) * max_forward_cm_s))
         self.send_velocity(forward, 0.0, yaw_cmd, record=False)
         return False
