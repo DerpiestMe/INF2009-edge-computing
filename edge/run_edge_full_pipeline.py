@@ -22,6 +22,7 @@ from edge.vision.intrusion_events import IntrusionEventManager
 from edge.vision.motion_detector import MotionDetector
 from edge.vision.vision_inference import VisionInference
 from edge.vision.zone_manager import ZoneManager
+from puppypi_movement import PuppyPiMovementController
 
 
 class FullEdgePipelineApp:
@@ -52,6 +53,11 @@ class FullEdgePipelineApp:
         track_deadband_px: int = 24,
         track_max_step: int = 18,
         track_interval_s: float = 0.06,
+        enable_mobility: bool = False,
+        approach_on_detect: bool = False,
+        approach_close_bbox_height_px: int = 180,
+        teleop_speed_x: float = 10.0,
+        teleop_yaw_deg_s: float = 25.0,
         show_window: bool = True,
         auto_sweep: bool = False,
     ) -> None:
@@ -73,6 +79,11 @@ class FullEdgePipelineApp:
         self.track_deadband_px = max(0, int(track_deadband_px))
         self.track_max_step = max(1, int(track_max_step))
         self.track_interval_s = max(0.02, float(track_interval_s))
+        self.enable_mobility = bool(enable_mobility)
+        self.approach_on_detect = bool(approach_on_detect)
+        self.approach_close_bbox_height_px = max(60, int(approach_close_bbox_height_px))
+        self.teleop_speed_x = float(teleop_speed_x)
+        self.teleop_yaw_rate = float(teleop_yaw_deg_s) * (3.141592653589793 / 180.0)
         self.max_loop_fps = max(1.0, float(max_loop_fps))
         self.loop_min_period_s = 1.0 / self.max_loop_fps
 
@@ -126,6 +137,11 @@ class FullEdgePipelineApp:
         self._gas_poll_interval_s = 0.1
         self._temp_poll_interval_s = 1.0
         self._last_track_ts = 0.0
+        self._movement = PuppyPiMovementController(
+            max_x_cm_s=max(5.0, self.teleop_speed_x),
+            max_yaw_rate_rad_s=max(0.2, self.teleop_yaw_rate),
+        )
+        self._approach_active = False
 
     def start(self) -> None:
         self._running = True
@@ -158,6 +174,19 @@ class FullEdgePipelineApp:
             self.track_interval_s,
         )
         self._logger.info("Servo direction multiplier: %s", self.servo_direction)
+        self._logger.info(
+            "Mobility: enabled=%s approach_on_detect=%s close_bbox_h=%s teleop_x=%.1f teleop_yaw=%.1fdeg/s",
+            self.enable_mobility,
+            self.approach_on_detect,
+            self.approach_close_bbox_height_px,
+            self.teleop_speed_x,
+            self.teleop_yaw_rate * 180.0 / 3.141592653589793,
+        )
+        if self.enable_mobility:
+            self._logger.info("Mobility keys: i/k forward/back, j/l turn left/right, <space> stop, r record toggle, p replay, h go_home")
+            ok = self._movement.start()
+            if not ok:
+                self._logger.warning("Mobility enabled but ROS movement stack is unavailable")
         if not self.vision.is_ready() and not self.disable_inference:
             self._logger.warning("Vision model unavailable: %s", self.vision.load_error)
         elif not self.disable_inference:
@@ -169,6 +198,9 @@ class FullEdgePipelineApp:
         self._infer_stop = True
         if self._infer_thread is not None:
             self._infer_thread.join(timeout=1.0)
+        if self.enable_mobility:
+            self._movement.stop_replay()
+            self._movement.stop()
         self.webcam.stop()
         self.gas_sensor.stop()
         self.temp_sensor.stop()
@@ -186,6 +218,25 @@ class FullEdgePipelineApp:
             self.servo.step(20 * self.servo_direction)
         elif key == ord("c"):
             self.servo.center()
+        elif self.enable_mobility and key == ord("i"):
+            self._movement.send_velocity(self.teleop_speed_x, 0.0, 0.0)
+        elif self.enable_mobility and key == ord("k"):
+            self._movement.send_velocity(-self.teleop_speed_x, 0.0, 0.0)
+        elif self.enable_mobility and key == ord("j"):
+            self._movement.send_velocity(0.0, 0.0, self.teleop_yaw_rate)
+        elif self.enable_mobility and key == ord("l"):
+            self._movement.send_velocity(0.0, 0.0, -self.teleop_yaw_rate)
+        elif self.enable_mobility and key == ord(" "):
+            self._movement.stop()
+        elif self.enable_mobility and key == ord("r"):
+            if self._movement.recording:
+                self._movement.stop_recording()
+            else:
+                self._movement.start_recording(clear_existing=True)
+        elif self.enable_mobility and key == ord("p"):
+            self._movement.replay_recording(blocking=False)
+        elif self.enable_mobility and key == ord("h"):
+            self._movement.go_home()
         return True
 
     def _print_sensor_lines(self) -> None:
@@ -365,6 +416,26 @@ class FullEdgePipelineApp:
                 tracking_active = self.track_person and len(detections) > 0
                 self._track_first_person(detections, frame_width=frame_w)
 
+                if self.enable_mobility and self.approach_on_detect and len(detections) > 0:
+                    if not self._approach_active:
+                        self._movement.stop_replay()
+                        self._movement.stop_recording()
+                        self._logger.info("Person detected: switching to approach mode")
+                        self._approach_active = True
+                    close_enough = self._movement.approach_person(
+                        detections[0],
+                        frame_width=frame_w,
+                        frame_height=frame_h,
+                        close_bbox_height_px=self.approach_close_bbox_height_px,
+                        max_forward_cm_s=self.teleop_speed_x,
+                    )
+                    if close_enough:
+                        self._movement.stop()
+                        self._logger.info("Approach complete: target is close enough for face capture")
+                elif self.enable_mobility and self._approach_active and len(detections) == 0:
+                    self._movement.stop()
+                    self._approach_active = False
+
                 if self.auto_sweep and not tracking_active:
                     self.servo.sweep_tick(
                         left_pulse=500,
@@ -461,6 +532,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--track-deadband-px", type=int, default=24)
     parser.add_argument("--track-max-step", type=int, default=18)
     parser.add_argument("--track-interval", type=float, default=0.06)
+    parser.add_argument("--enable-mobility", action="store_true")
+    parser.add_argument("--approach-on-detect", action="store_true")
+    parser.add_argument("--approach-close-bbox-height", type=int, default=180)
+    parser.add_argument("--teleop-speed-x", type=float, default=10.0)
+    parser.add_argument("--teleop-yaw-deg-s", type=float, default=25.0)
     parser.add_argument("--auto-sweep", action="store_true")
     parser.add_argument("--headless", action="store_true")
     return parser.parse_args()
@@ -497,6 +573,11 @@ def main() -> None:
         track_deadband_px=args.track_deadband_px,
         track_max_step=args.track_max_step,
         track_interval_s=args.track_interval,
+        enable_mobility=args.enable_mobility,
+        approach_on_detect=args.approach_on_detect,
+        approach_close_bbox_height_px=args.approach_close_bbox_height,
+        teleop_speed_x=args.teleop_speed_x,
+        teleop_yaw_deg_s=args.teleop_yaw_deg_s,
         show_window=not args.headless,
         auto_sweep=args.auto_sweep,
     )
