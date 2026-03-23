@@ -70,6 +70,10 @@ class PuppyPiMovementController:
     def recorded_steps(self) -> List[MovementStep]:
         return list(self._recorded_steps)
 
+    @property
+    def replaying(self) -> bool:
+        return self._replay_thread is not None and self._replay_thread.is_alive()
+
     def start(self) -> bool:
         if self._ready:
             return True

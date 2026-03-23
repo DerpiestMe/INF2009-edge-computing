@@ -452,7 +452,10 @@ class FullEdgePipelineApp:
                 tracking_active = self.track_person and len(detections) > 0
                 self._track_first_person(detections, frame_width=frame_w)
 
-                if self.enable_mobility and self.approach_on_detect and len(detections) > 0:
+                manual_override = self.enable_mobility and (self._movement.recording or self._movement.replaying)
+                if manual_override and self._approach_active:
+                    self._logger.info("Approach paused: manual record/replay override active")
+                if self.enable_mobility and self.approach_on_detect and len(detections) > 0 and not manual_override:
                     if not self._approach_active:
                         self._movement.stop_replay()
                         self._movement.stop_recording()
@@ -468,7 +471,7 @@ class FullEdgePipelineApp:
                     if close_enough:
                         self._movement.stop()
                         self._logger.info("Approach complete: target is close enough for face capture")
-                elif self.enable_mobility and self._approach_active and len(detections) == 0:
+                elif self.enable_mobility and self._approach_active and (len(detections) == 0 or manual_override):
                     self._movement.stop()
                     self._approach_active = False
 
