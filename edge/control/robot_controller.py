@@ -3,7 +3,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Optional, Sequence, Tuple
 
 
 DEFAULT_SERVO_ID = 9
@@ -42,7 +42,7 @@ class CameraServoController:
         self._load_driver()
 
     @staticmethod
-    def _safe_import(module_name: str) -> tuple[Optional[Any], Optional[str]]:
+    def _safe_import(module_name: str) -> Tuple[Optional[Any], Optional[str]]:
         try:
             return importlib.import_module(module_name), None
         except Exception as exc:
