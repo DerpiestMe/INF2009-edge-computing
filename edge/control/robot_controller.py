@@ -176,13 +176,17 @@ class CameraServoController:
         return max(self.min_pulse, min(self.max_pulse, int(pulse)))
 
     def set_pulse(self, pulse: int, duration_ms: Optional[int] = None) -> bool:
+        return self.set_pulse_for_id(self.servo_id, pulse, duration_ms=duration_ms)
+
+    def set_pulse_for_id(self, servo_id: int, pulse: int, duration_ms: Optional[int] = None) -> bool:
         if not self.is_available:
             return False
 
         pulse = self._clamp_pulse(pulse)
         duration_ms = self.default_duration_ms if duration_ms is None else int(duration_ms)
-        self._set_pulse_fn(self.servo_id, pulse, duration_ms)
-        self._current_pulse = pulse
+        self._set_pulse_fn(int(servo_id), pulse, duration_ms)
+        if int(servo_id) == self.servo_id:
+            self._current_pulse = pulse
         return True
 
     def center(self, duration_ms: Optional[int] = None) -> bool:

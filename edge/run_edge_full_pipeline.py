@@ -58,6 +58,10 @@ class FullEdgePipelineApp:
         approach_close_bbox_height_px: int = 180,
         teleop_speed_x: float = 10.0,
         teleop_yaw_deg_s: float = 25.0,
+        teleop_hold_timeout_s: float = 0.18,
+        wrist_servo_id: int = 10,
+        wrist_start_pulse: int = 1100,
+        wrist_on_start: bool = True,
         show_window: bool = True,
         auto_sweep: bool = False,
     ) -> None:
@@ -84,6 +88,10 @@ class FullEdgePipelineApp:
         self.approach_close_bbox_height_px = max(60, int(approach_close_bbox_height_px))
         self.teleop_speed_x = float(teleop_speed_x)
         self.teleop_yaw_rate = float(teleop_yaw_deg_s) * (3.141592653589793 / 180.0)
+        self.teleop_hold_timeout_s = max(0.05, float(teleop_hold_timeout_s))
+        self.wrist_servo_id = int(wrist_servo_id)
+        self.wrist_start_pulse = int(wrist_start_pulse)
+        self.wrist_on_start = bool(wrist_on_start)
         self.max_loop_fps = max(1.0, float(max_loop_fps))
         self.loop_min_period_s = 1.0 / self.max_loop_fps
 
@@ -142,6 +150,9 @@ class FullEdgePipelineApp:
             max_yaw_rate_rad_s=max(0.2, self.teleop_yaw_rate),
         )
         self._approach_active = False
+        self._teleop_active_x = 0.0
+        self._teleop_active_yaw = 0.0
+        self._teleop_last_input_ts = 0.0
 
     def start(self) -> None:
         self._running = True
@@ -149,6 +160,14 @@ class FullEdgePipelineApp:
         self.gas_sensor.start()
         self.temp_sensor.start()
         self.servo.center()
+        if self.wrist_on_start:
+            moved = self.servo.set_pulse_for_id(self.wrist_servo_id, self.wrist_start_pulse, duration_ms=300)
+            self._logger.info(
+                "Wrist startup pulse: id=%s pulse=%s applied=%s",
+                self.wrist_servo_id,
+                self.wrist_start_pulse,
+                moved,
+            )
         self._logger.info("Servo: %s", self.servo.describe())
         self._logger.info("Controls: q quit | s toggle sweep | [ left | ] right | c center")
         self._logger.info(
@@ -183,7 +202,9 @@ class FullEdgePipelineApp:
             self.teleop_yaw_rate * 180.0 / 3.141592653589793,
         )
         if self.enable_mobility:
-            self._logger.info("Mobility keys: i/k forward/back, j/l turn left/right, <space> stop, r record toggle, p replay, h go_home")
+            self._logger.info(
+                "Mobility keys: hold i/k forward/back, hold j/l turn left/right, <space> stop, r record toggle, p replay, h go_home"
+            )
             ok = self._movement.start()
             if not ok:
                 self._logger.warning("Mobility enabled but ROS movement stack is unavailable")
@@ -208,34 +229,45 @@ class FullEdgePipelineApp:
             cv2.destroyAllWindows()
 
     def _handle_key(self, key: int) -> bool:
-        if key in (ord("q"), 27):
+        if key in (ord("q"), ord("Q"), 27):
             return False
-        if key == ord("s"):
+        key_ch = ""
+        if 0 <= key <= 255:
+            key_ch = chr(key).lower()
+        now = time.time()
+
+        if key_ch == "s":
             self.auto_sweep = not self.auto_sweep
-        elif key == ord("["):
+        elif key_ch == "[":
             self.servo.step(-20 * self.servo_direction)
-        elif key == ord("]"):
+        elif key_ch == "]":
             self.servo.step(20 * self.servo_direction)
-        elif key == ord("c"):
+        elif key_ch == "c":
             self.servo.center()
-        elif self.enable_mobility and key == ord("i"):
-            self._movement.send_velocity(self.teleop_speed_x, 0.0, 0.0)
-        elif self.enable_mobility and key == ord("k"):
-            self._movement.send_velocity(-self.teleop_speed_x, 0.0, 0.0)
-        elif self.enable_mobility and key == ord("j"):
-            self._movement.send_velocity(0.0, 0.0, self.teleop_yaw_rate)
-        elif self.enable_mobility and key == ord("l"):
-            self._movement.send_velocity(0.0, 0.0, -self.teleop_yaw_rate)
+        elif self.enable_mobility and key_ch == "i":
+            self._teleop_active_x, self._teleop_active_yaw = self.teleop_speed_x, 0.0
+            self._teleop_last_input_ts = now
+        elif self.enable_mobility and key_ch == "k":
+            self._teleop_active_x, self._teleop_active_yaw = -self.teleop_speed_x, 0.0
+            self._teleop_last_input_ts = now
+        elif self.enable_mobility and key_ch == "j":
+            self._teleop_active_x, self._teleop_active_yaw = 0.0, self.teleop_yaw_rate
+            self._teleop_last_input_ts = now
+        elif self.enable_mobility and key_ch == "l":
+            self._teleop_active_x, self._teleop_active_yaw = 0.0, -self.teleop_yaw_rate
+            self._teleop_last_input_ts = now
         elif self.enable_mobility and key == ord(" "):
+            self._teleop_active_x, self._teleop_active_yaw = 0.0, 0.0
+            self._teleop_last_input_ts = now
             self._movement.stop()
-        elif self.enable_mobility and key == ord("r"):
+        elif self.enable_mobility and key_ch == "r":
             if self._movement.recording:
                 self._movement.stop_recording()
             else:
                 self._movement.start_recording(clear_existing=True)
-        elif self.enable_mobility and key == ord("p"):
+        elif self.enable_mobility and key_ch == "p":
             self._movement.replay_recording(blocking=False)
-        elif self.enable_mobility and key == ord("h"):
+        elif self.enable_mobility and key_ch == "h":
             self._movement.go_home()
         return True
 
@@ -436,6 +468,12 @@ class FullEdgePipelineApp:
                     self._movement.stop()
                     self._approach_active = False
 
+                if self.enable_mobility and not self._approach_active:
+                    now_teleop = time.time()
+                    if now_teleop - self._teleop_last_input_ts > self.teleop_hold_timeout_s:
+                        self._teleop_active_x, self._teleop_active_yaw = 0.0, 0.0
+                    self._movement.send_velocity(self._teleop_active_x, 0.0, self._teleop_active_yaw)
+
                 if self.auto_sweep and not tracking_active:
                     self.servo.sweep_tick(
                         left_pulse=500,
@@ -537,6 +575,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--approach-close-bbox-height", type=int, default=180)
     parser.add_argument("--teleop-speed-x", type=float, default=10.0)
     parser.add_argument("--teleop-yaw-deg-s", type=float, default=25.0)
+    parser.add_argument("--teleop-hold-timeout", type=float, default=0.18)
+    parser.add_argument("--wrist-servo-id", type=int, default=10)
+    parser.add_argument("--wrist-start-pulse", type=int, default=1100)
+    parser.add_argument("--disable-wrist-on-start", action="store_true")
     parser.add_argument("--auto-sweep", action="store_true")
     parser.add_argument("--headless", action="store_true")
     return parser.parse_args()
@@ -578,6 +620,10 @@ def main() -> None:
         approach_close_bbox_height_px=args.approach_close_bbox_height,
         teleop_speed_x=args.teleop_speed_x,
         teleop_yaw_deg_s=args.teleop_yaw_deg_s,
+        teleop_hold_timeout_s=args.teleop_hold_timeout,
+        wrist_servo_id=args.wrist_servo_id,
+        wrist_start_pulse=args.wrist_start_pulse,
+        wrist_on_start=not args.disable_wrist_on_start,
         show_window=not args.headless,
         auto_sweep=args.auto_sweep,
     )
