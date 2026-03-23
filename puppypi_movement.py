@@ -32,11 +32,13 @@ class PuppyPiMovementController:
         velocity_topic: str = "/puppy_control/velocity/autogait",
         max_x_cm_s: float = 20.0,
         max_yaw_rate_rad_s: float = math.radians(30.0),
+        gait_mode: str = "walk",
     ) -> None:
         self.node_name = node_name
         self.velocity_topic = velocity_topic
         self.max_x_cm_s = float(max_x_cm_s)
         self.max_yaw_rate_rad_s = float(max_yaw_rate_rad_s)
+        self.gait_mode = str(gait_mode).lower()
 
         self._logger = logging.getLogger(self.__class__.__name__)
         self._rospy = None
@@ -112,7 +114,7 @@ class PuppyPiMovementController:
     def _publish_default_pose_and_gait(self) -> None:
         if not self._ready and self._rospy is None:
             return
-        # Conservative walk profile for better stability on uneven floors.
+        # Base pose (x_shift can be adjusted by gait mode below).
         pose = {
             "stance_x": 0.0,
             "stance_y": 0.0,
@@ -123,11 +125,18 @@ class PuppyPiMovementController:
             "yaw": 0.0,
             "run_time": 500,
         }
+        gait_profiles = {
+            "walk": {"overlap_time": 0.15, "swing_time": 0.28, "clearance_time": 0.35, "z_clearance": 4.0, "x_shift": -0.65},
+            "amble": {"overlap_time": 0.12, "swing_time": 0.22, "clearance_time": 0.12, "z_clearance": 5.0, "x_shift": -0.9},
+            "trot": {"overlap_time": 0.20, "swing_time": 0.30, "clearance_time": 0.00, "z_clearance": 6.0, "x_shift": -0.6},
+        }
+        profile = gait_profiles.get(self.gait_mode, gait_profiles["walk"])
+        pose["x_shift"] = profile["x_shift"]
         gait = {
-            "overlap_time": 0.15,
-            "swing_time": 0.28,
-            "clearance_time": 0.35,
-            "z_clearance": 4.0,
+            "overlap_time": profile["overlap_time"],
+            "swing_time": profile["swing_time"],
+            "clearance_time": profile["clearance_time"],
+            "z_clearance": profile["z_clearance"],
         }
         try:
             self._pose_pub.publish(**pose)
@@ -136,6 +145,11 @@ class PuppyPiMovementController:
             self._rospy.sleep(0.15)
         except Exception as exc:
             self._logger.warning("Failed to publish default pose/gait: %s", exc)
+
+    def set_gait_mode(self, gait_mode: str) -> None:
+        self.gait_mode = str(gait_mode).lower()
+        if self._ready:
+            self._publish_default_pose_and_gait()
 
     def send_velocity(self, x: float, y: float = 0.0, yaw_rate: float = 0.0, record: bool = True) -> None:
         if not self._ready:

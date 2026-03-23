@@ -35,13 +35,13 @@ class FullEdgePipelineApp:
         height: int = 480,
         fps: float = 30.0,
         model_path: str = "yolov8n.pt",
-        confidence: float = 0.4,
+        confidence: float = 0.35,
         servo_id: int = 9,
         servo_mode: str = "pwm",
         servo_direction: int = -1,
-        infer_width: int = 320,
-        infer_height: int = 240,
-        infer_interval_s: float = 0.25,
+        infer_width: int = 384,
+        infer_height: int = 288,
+        infer_interval_s: float = 0.12,
         force_infer_interval_s: float = 1.2,
         max_loop_fps: float = 18.0,
         disable_motion_gate: bool = True,
@@ -59,6 +59,7 @@ class FullEdgePipelineApp:
         teleop_speed_x: float = 5.0,
         teleop_yaw_deg_s: float = 12.0,
         teleop_hold_timeout_s: float = 0.18,
+        gait_mode: str = "walk",
         wrist_servo_id: int = 10,
         wrist_start_pulse: int = 1100,
         wrist_on_start: bool = True,
@@ -89,6 +90,7 @@ class FullEdgePipelineApp:
         self.teleop_speed_x = float(teleop_speed_x)
         self.teleop_yaw_rate = float(teleop_yaw_deg_s) * (3.141592653589793 / 180.0)
         self.teleop_hold_timeout_s = max(0.05, float(teleop_hold_timeout_s))
+        self.gait_mode = str(gait_mode).lower()
         self.wrist_servo_id = int(wrist_servo_id)
         self.wrist_start_pulse = int(wrist_start_pulse)
         self.wrist_on_start = bool(wrist_on_start)
@@ -148,6 +150,7 @@ class FullEdgePipelineApp:
         self._movement = PuppyPiMovementController(
             max_x_cm_s=max(5.0, self.teleop_speed_x),
             max_yaw_rate_rad_s=max(0.2, self.teleop_yaw_rate),
+            gait_mode=self.gait_mode,
         )
         self._approach_active = False
         self._teleop_active_x = 0.0
@@ -201,6 +204,7 @@ class FullEdgePipelineApp:
             self.teleop_speed_x,
             self.teleop_yaw_rate * 180.0 / 3.141592653589793,
         )
+        self._logger.info("Mobility gait mode: %s", self.gait_mode)
         if self.enable_mobility:
             self._logger.info(
                 "Mobility keys: hold i/k forward/back, hold j/l turn left/right, <space> stop, r record toggle, p replay, h go_home"
@@ -552,13 +556,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--model-path", default="yolov8n.pt")
-    parser.add_argument("--confidence", type=float, default=0.4)
+    parser.add_argument("--confidence", type=float, default=0.35)
     parser.add_argument("--servo-id", type=int, default=9)
     parser.add_argument("--servo-mode", choices=["auto", "pwm", "bus"], default="pwm")
     parser.add_argument("--servo-direction", type=int, choices=[-1, 1], default=-1)
-    parser.add_argument("--infer-width", type=int, default=320)
-    parser.add_argument("--infer-height", type=int, default=240)
-    parser.add_argument("--infer-interval", type=float, default=0.25)
+    parser.add_argument("--infer-width", type=int, default=384)
+    parser.add_argument("--infer-height", type=int, default=288)
+    parser.add_argument("--infer-interval", type=float, default=0.12)
     parser.add_argument("--force-infer-interval", type=float, default=0.8)
     parser.add_argument("--max-loop-fps", type=float, default=18.0)
     parser.add_argument("--disable-motion-gate", action="store_true", dest="disable_motion_gate")
@@ -577,6 +581,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--teleop-speed-x", type=float, default=5.0)
     parser.add_argument("--teleop-yaw-deg-s", type=float, default=12.0)
     parser.add_argument("--teleop-hold-timeout", type=float, default=0.18)
+    parser.add_argument("--gait-mode", choices=["walk", "amble", "trot"], default="walk")
     parser.add_argument("--wrist-servo-id", type=int, default=10)
     parser.add_argument("--wrist-start-pulse", type=int, default=1100)
     parser.add_argument("--disable-wrist-on-start", action="store_true")
@@ -623,6 +628,7 @@ def main() -> None:
         teleop_speed_x=args.teleop_speed_x,
         teleop_yaw_deg_s=args.teleop_yaw_deg_s,
         teleop_hold_timeout_s=args.teleop_hold_timeout,
+        gait_mode=args.gait_mode,
         wrist_servo_id=args.wrist_servo_id,
         wrist_start_pulse=args.wrist_start_pulse,
         wrist_on_start=not args.disable_wrist_on_start,
