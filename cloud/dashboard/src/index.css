@@ -1,0 +1,63 @@
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow:wght@300;400;500;600;700&family=Barlow+Condensed:wght@400;600;700&display=swap');
+
+:root {
+  --bg-base:       #080c10;
+  --bg-panel:      #0d1117;
+  --bg-card:       #111820;
+  --bg-hover:      #161e28;
+  --border:        #1e2d3d;
+  --border-bright: #2a3f55;
+
+  --text-primary:  #e2eaf4;
+  --text-secondary:#7a9ab8;
+  --text-dim:      #3a5068;
+
+  --accent-cyan:   #00d4ff;
+  --accent-green:  #00ff88;
+  --accent-yellow: #ffcc00;
+  --accent-red:    #ff3b5c;
+  --accent-orange: #ff7b22;
+
+  --ok:    #00ff88;
+  --warn:  #ffcc00;
+  --crit:  #ff3b5c;
+  --info:  #00d4ff;
+
+  --font-mono:  'Share Tech Mono', monospace;
+  --font-ui:    'Barlow', sans-serif;
+  --font-label: 'Barlow Condensed', sans-serif;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root {
+  height: 100%;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Subtle scanline overlay */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.03) 2px,
+    rgba(0, 0, 0, 0.03) 4px
+  );
+  pointer-events: none;
+  z-index: 9999;
+}
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: var(--bg-base); }
+::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
+
+.mono { font-family: var(--font-mono); }
+.label { font-family: var(--font-label); letter-spacing: 0.08em; text-transform: uppercase; }

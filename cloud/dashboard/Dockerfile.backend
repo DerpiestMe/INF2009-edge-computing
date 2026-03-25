@@ -1,0 +1,13 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    websockets==12.0 \
+    paho-mqtt==1.6.1 \
+    aiohttp==3.9.5
+
+COPY websocket_server.py .
+COPY stream_server.py .
+
+EXPOSE 8765 8766

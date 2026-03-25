@@ -1,0 +1,188 @@
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-card);
+}
+
+.title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  flex: 1;
+}
+
+.connBadge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.connDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.connLabel {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.body {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Robot ID row */
+.robotId {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.robotIcon {
+  font-size: 16px;
+  color: var(--accent-cyan);
+}
+
+.robotLabel {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+/* Meter bars */
+.meters {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.meterRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.meterLabel {
+  font-size: 10px;
+  color: var(--text-secondary);
+  width: 28px;
+  flex-shrink: 0;
+}
+
+.meterTrack {
+  flex: 1;
+  height: 4px;
+  background: var(--bg-base);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.meterFill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.5s ease, background 0.4s;
+}
+
+.meterPct {
+  font-size: 10px;
+  color: var(--text-secondary);
+  width: 32px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+/* Stats grid */
+.stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.tile {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tileLabel {
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 0.1em;
+}
+
+.tileVal {
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+}
+
+.tileNum {
+  font-size: 16px;
+  line-height: 1;
+  transition: color 0.4s;
+}
+
+.tileUnit {
+  font-size: 9px;
+  color: var(--text-secondary);
+}
+
+.tileSub {
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+/* Thread status */
+.threads {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.thread {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.threadDot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.threadName {
+  font-size: 10px;
+  color: var(--text-secondary);
+  flex: 1;
+}
+
+.threadPrio {
+  font-size: 9px;
+  color: var(--text-dim);
+}

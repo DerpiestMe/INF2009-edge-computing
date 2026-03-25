@@ -1,0 +1,31 @@
+version: "3.8"
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports: ["1883:1883"]
+    volumes: ["./mosquitto.conf:/mosquitto/config/mosquitto.conf"]
+
+  websocket_server:
+    build: ./cloud/dashboard
+    command: python websocket_server.py
+    ports: ["8765:8765"]
+    depends_on: [mosquitto]
+
+  stream_server:
+    build: ./cloud/dashboard
+    command: python stream_server.py
+    ports: ["8766:8766"]
+
+  dashboard:
+    build: ./cloud/dashboard
+    ports: ["3000:3000"]
+    command: npm run dev -- --host
+
+  influxdb:
+    image: influxdb:2
+    ports: ["8086:8086"]
+
+  grafana:
+    image: grafana/grafana:latest
+    ports: ["3001:3000"]
+    depends_on: [influxdb]

@@ -1,0 +1,199 @@
+.root {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-base);
+}
+
+/* ═══════════════════════════════════════
+   TOP BAR
+═══════════════════════════════════════ */
+.topBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  height: 50px;
+  flex-shrink: 0;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+}
+
+.topLeft {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.logo {
+  font-size: 22px;
+  color: var(--accent-cyan);
+  line-height: 1;
+}
+
+.titleBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.sysName {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: var(--text-primary);
+}
+
+.sysDesc {
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+
+.topCenter {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+}
+
+.alertPill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 59, 92, 0.12);
+  border: 1px solid rgba(255, 59, 92, 0.35);
+  padding: 4px 12px;
+  border-radius: 2px;
+  animation: alertPulse 2s ease infinite;
+}
+
+@keyframes alertPulse {
+  0%, 100% { border-color: rgba(255, 59, 92, 0.35); }
+  50% { border-color: rgba(255, 59, 92, 0.7); }
+}
+
+.alertPillDot {
+  width: 6px;
+  height: 6px;
+  background: var(--crit);
+  border-radius: 50%;
+  box-shadow: 0 0 6px var(--crit);
+  animation: blink 1s steps(1) infinite;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.alertPillText {
+  font-size: 11px;
+  color: var(--crit);
+  letter-spacing: 0.1em;
+}
+
+.topRight {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.wsStatus {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wsDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.wsLabel {
+  font-size: 10px;
+  color: var(--text-secondary);
+  letter-spacing: 0.1em;
+}
+
+.clock {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  border-left: 1px solid var(--border);
+  padding-left: 16px;
+}
+
+.time {
+  font-size: 16px;
+  color: var(--text-primary);
+  line-height: 1;
+}
+
+.date {
+  font-size: 9px;
+  color: var(--text-dim);
+}
+
+/* ═══════════════════════════════════════
+   MAIN GRID
+═══════════════════════════════════════ */
+.grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1.2fr 300px 300px;
+  grid-template-rows: 1fr;
+  gap: 8px;
+  padding: 8px;
+}
+
+.colCamera {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.colCamera > * {
+  flex: 1;
+  min-height: 0;
+}
+
+.colCharts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.colRight {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+/* Alert log fills remaining height */
+.colRight > :last-child {
+  flex: 1;
+  min-height: 0;
+}
+
+/* ═══════════════════════════════════════
+   RESPONSIVE — narrower screens
+═══════════════════════════════════════ */
+@media (max-width: 1100px) {
+  .grid {
+    grid-template-columns: 1fr 280px;
+    grid-template-rows: auto auto;
+  }
+
+  .colCamera { grid-column: 1; grid-row: 1; }
+  .colCharts { grid-column: 2; grid-row: 1 / 3; }
+  .colRight  { grid-column: 1; grid-row: 2; flex-direction: row; }
+  .colRight > :last-child { flex: 1; }
+}
