@@ -1,102 +1,56 @@
 """
-alert_router.py — PuppyPi Alert Routing (Email + SMS)
-======================================================
-Handles all outbound notifications for intrusion and hazard events.
-Uses AWS SES (email) and AWS SNS (SMS) to route alerts.
+alert_router.py — PuppyPi Alert Router (Local / Laptop-as-Cloud Version)
+=========================================================================
+Sends alerts via Gmail SMTP (email) instead of AWS SES/SNS.
+No AWS credentials or internet-facing services required.
+Works entirely over the PuppyPi hotspot local network.
 
-Alert severity levels and their routing:
-  CRITICAL  → SMS + Email immediately
-  HIGH      → SMS + Email immediately
+Setup (one-time):
+  1. Go to your Google Account → Security → 2-Step Verification → App Passwords
+  2. Create an App Password for "Mail"
+  3. Fill in GMAIL_SENDER, GMAIL_APP_PASSWORD, and EMAIL_RECIPIENTS below
+
+Alert severity routing:
+  CRITICAL  → Email immediately
+  HIGH      → Email immediately
   MEDIUM    → Email only
-  LOW       → Email only (batched, non-urgent)
-
-Includes:
-  - Rate limiting (prevents alert storms)
-  - Alert deduplication (won't re-alert same event within cooldown)
-  - HTML email templates with event details
-  - Configurable recipient list from AWS SSM Parameter Store
-
-AWS Services used:
-  - SES : Transactional email (HTML templates)
-  - SNS : SMS to phone numbers
-  - SSM : Secure storage of recipient config
+  LOW       → Log only (no email, avoids noise)
 """
 
-import json
-import time
 import logging
+import smtplib
 import hashlib
-import boto3
-from datetime import datetime, timezone
+import time
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from typing import Optional
-from botocore.exceptions import ClientError
 
 log = logging.getLogger("alert_router")
 
-# ── Config ────────────────────────────────────────────────────────────────────
-AWS_REGION        = "ap-southeast-1"
-SES_SENDER_EMAIL  = "alerts@your-domain.com"   # Must be SES-verified
-SSM_PARAM_PATH    = "/puppypi/alerts"           # SSM path for config
+# ── Config — fill these in ────────────────────────────────────────────────────
+GMAIL_SENDER       = "your.gmail@gmail.com"       # sender Gmail address
+GMAIL_APP_PASSWORD = "xxxx xxxx xxxx xxxx"        # Gmail App Password (not your login password)
 
-# Alert cooldown — won't send duplicate alerts for the same type within this window
-COOLDOWN_SECONDS  = {
-    "INTRUDER": 300,   # 5 min cooldown per zone
-    "HAZARD":   120,   # 2 min cooldown (hazards are more urgent)
-    "SYSTEM":   1800,  # 30 min cooldown for system alerts (battery, etc.)
+EMAIL_RECIPIENTS   = [
+    "member1@example.com",
+    "member2@example.com",
+    "member3@example.com",
+    "member4@example.com",
+    "member5@example.com"
+]
+
+# Alert cooldown — won't re-send same alert type within this window (seconds)
+COOLDOWN_SECONDS = {
+    "INTRUDER": 300,    # 5 min — avoid spam if person stays in zone
+    "HAZARD":   120,    # 2 min — gas alerts are more urgent
+    "SYSTEM":   1800,   # 30 min — battery / system warnings
 }
-
-# ── AWS Clients ───────────────────────────────────────────────────────────────
-ses = boto3.client("ses",  region_name=AWS_REGION)
-sns = boto3.client("sns",  region_name=AWS_REGION)
-ssm = boto3.client("ssm",  region_name=AWS_REGION)
-
-# ── Recipient Config ──────────────────────────────────────────────────────────
-class RecipientConfig:
-    """
-    Loads alert recipient list from SSM Parameter Store.
-    Cached for 5 minutes to avoid excessive SSM calls.
-    
-    SSM parameters expected:
-      /puppypi/alerts/email_recipients  → JSON list of email addresses
-      /puppypi/alerts/sms_recipients    → JSON list of phone numbers (+65XXXXXXXX)
-    """
-    _cache      = {}
-    _cache_time = 0
-    CACHE_TTL   = 300  # 5 minutes
-
-    @classmethod
-    def get(cls) -> dict:
-        if time.time() - cls._cache_time < cls.CACHE_TTL and cls._cache:
-            return cls._cache
-
-        try:
-            email_param = ssm.get_parameter(
-                Name=f"{SSM_PARAM_PATH}/email_recipients", WithDecryption=False
-            )
-            sms_param = ssm.get_parameter(
-                Name=f"{SSM_PARAM_PATH}/sms_recipients", WithDecryption=False
-            )
-            cls._cache = {
-                "email": json.loads(email_param["Parameter"]["Value"]),
-                "sms":   json.loads(sms_param["Parameter"]["Value"]),
-            }
-        except ClientError as e:
-            log.error(f"Failed to load recipients from SSM: {e}")
-            # Fall back to hardcoded defaults if SSM unavailable
-            cls._cache = {
-                "email": ["team@example.com"],
-                "sms":   [],
-            }
-
-        cls._cache_time = time.time()
-        return cls._cache
 
 # ── Rate Limiter ──────────────────────────────────────────────────────────────
 class RateLimiter:
     """
-    Simple in-memory rate limiter to prevent alert storms.
-    Key is a hash of (alert_type + dedup_key) so same event type
-    in the same zone won't spam recipients.
+    Prevents alert storms by enforcing a cooldown per alert type + dedup key.
+    In-memory only — resets when the process restarts.
     """
     _last_sent: dict = {}
 
@@ -107,85 +61,72 @@ class RateLimiter:
         last     = cls._last_sent.get(key, 0)
 
         if time.time() - last < cooldown:
-            log.info(f"Rate limited: {alert_type}/{dedup_key} (cooldown {cooldown}s)")
+            remaining = int(cooldown - (time.time() - last))
+            log.info(f"Rate limited: {alert_type}/{dedup_key} — cooldown {remaining}s remaining")
             return False
 
         cls._last_sent[key] = time.time()
         return True
 
-# ── Email Templates ───────────────────────────────────────────────────────────
-def build_html_email(alert_type: str, subject: str, message: str, severity: str) -> str:
-    """
-    Build a styled HTML email body for the alert.
-    Uses inline CSS for maximum email client compatibility.
-    """
+# ── Email Builder ─────────────────────────────────────────────────────────────
+def _build_html_email(alert_type: str, subject: str, message: str, severity: str) -> str:
+    """Build a simple HTML email body."""
     color_map = {
         "CRITICAL": "#DC2626",
         "HIGH":     "#EA580C",
         "MEDIUM":   "#D97706",
         "LOW":      "#2563EB",
     }
-    badge_color = color_map.get(severity, "#6B7280")
-    timestamp   = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
     icon_map = {
         "INTRUDER": "🚨",
         "HAZARD":   "☣️",
         "SYSTEM":   "⚙️",
     }
-    icon = icon_map.get(alert_type, "⚠️")
-
-    # Convert plain message to HTML lines
+    badge_color = color_map.get(severity, "#6B7280")
+    icon        = icon_map.get(alert_type, "⚠️")
+    timestamp   = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
     message_html = "".join(
-        f"<p style='margin:4px 0;color:#374151;font-size:15px;'>{line}</p>"
+        f"<p style='margin:4px 0;color:#374151;font-size:15px;font-family:monospace'>{line}</p>"
         for line in message.strip().split("\n") if line.strip()
     )
 
     return f"""
     <!DOCTYPE html>
-    <html lang="en">
+    <html>
     <body style="margin:0;padding:0;background:#F3F4F6;font-family:monospace;">
       <table width="100%" cellpadding="0" cellspacing="0">
-        <tr><td align="center" style="padding:32px 16px;">
-          <table width="580" cellpadding="0" cellspacing="0"
-            style="background:#fff;border-radius:12px;overflow:hidden;
-                   box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+        <tr><td align="center" style="padding:28px 16px;">
+          <table width="560" cellpadding="0" cellspacing="0"
+            style="background:#fff;border-radius:10px;overflow:hidden;
+                   box-shadow:0 4px 20px rgba(0,0,0,0.08);">
 
-            <!-- Header -->
-            <tr><td style="background:#111827;padding:24px 32px;">
-              <p style="margin:0;font-size:11px;letter-spacing:4px;color:#6B7280;">
+            <tr><td style="background:#111827;padding:22px 28px;">
+              <p style="margin:0;font-size:10px;letter-spacing:4px;color:#6B7280;">
                 PUPPYPI SECURITY SYSTEM
               </p>
-              <h1 style="margin:8px 0 0;font-size:22px;color:#F9FAFB;font-weight:900;">
+              <h1 style="margin:8px 0 0;font-size:20px;color:#F9FAFB;font-weight:900;">
                 {icon} {subject}
               </h1>
             </td></tr>
 
-            <!-- Severity Badge -->
-            <tr><td style="padding:16px 32px 0;">
+            <tr><td style="padding:14px 28px 0;">
               <span style="display:inline-block;background:{badge_color};color:#fff;
-                           font-size:11px;font-weight:700;letter-spacing:2px;
-                           padding:4px 12px;border-radius:4px;">
+                           font-size:10px;font-weight:700;letter-spacing:2px;
+                           padding:3px 10px;border-radius:4px;">
                 {severity} SEVERITY
               </span>
             </td></tr>
 
-            <!-- Message Body -->
-            <tr><td style="padding:20px 32px;">
+            <tr><td style="padding:16px 28px;">
               <div style="background:#F9FAFB;border:1px solid #E5E7EB;
-                          border-radius:8px;padding:16px 20px;">
+                          border-radius:8px;padding:14px 18px;">
                 {message_html}
               </div>
             </td></tr>
 
-            <!-- Footer -->
-            <tr><td style="padding:16px 32px 24px;border-top:1px solid #F3F4F6;">
-              <p style="margin:0;font-size:11px;color:#9CA3AF;">
-                Generated at {timestamp} · PuppyPi Edge Security System
-              </p>
-              <p style="margin:4px 0 0;font-size:11px;color:#9CA3AF;">
-                To manage alert settings, update SSM Parameter Store at
-                <code>/puppypi/alerts/</code>
+            <tr><td style="padding:12px 28px 20px;border-top:1px solid #F3F4F6;">
+              <p style="margin:0;font-size:10px;color:#9CA3AF;">
+                Sent at {timestamp} · PuppyPi Edge Security System (INF2009)
               </p>
             </td></tr>
 
@@ -196,86 +137,66 @@ def build_html_email(alert_type: str, subject: str, message: str, severity: str)
     </html>
     """
 
-# ── SES Email Sender ──────────────────────────────────────────────────────────
-def send_email(subject: str, message: str, alert_type: str, severity: str):
-    """Send HTML alert email to all configured recipients via AWS SES."""
-    recipients = RecipientConfig.get().get("email", [])
-    if not recipients:
-        log.warning("No email recipients configured")
+# ── Email Sender ──────────────────────────────────────────────────────────────
+def _send_email(subject: str, message: str, alert_type: str, severity: str):
+    """
+    Send alert email via Gmail SMTP SSL.
+    Uses your Gmail App Password — does NOT need AWS or internet beyond Gmail.
+    """
+    if not EMAIL_RECIPIENTS:
+        log.warning("No email recipients configured — skipping email")
         return
 
-    html_body = build_html_email(alert_type, subject, message, severity)
+    if not GMAIL_APP_PASSWORD or GMAIL_APP_PASSWORD == "xxxx xxxx xxxx xxxx":
+        log.warning("Gmail App Password not configured — logging alert instead")
+        log.warning(f"[ALERT] {subject}\n{message}")
+        return
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = GMAIL_SENDER
+    msg["To"]      = ", ".join(EMAIL_RECIPIENTS)
+
+    # Attach both plain text and HTML versions
+    msg.attach(MIMEText(message, "plain"))
+    msg.attach(MIMEText(_build_html_email(alert_type, subject, message, severity), "html"))
 
     try:
-        response = ses.send_email(
-            Source=SES_SENDER_EMAIL,
-            Destination={"ToAddresses": recipients},
-            Message={
-                "Subject": {"Data": subject, "Charset": "UTF-8"},
-                "Body": {
-                    "Html": {"Data": html_body,  "Charset": "UTF-8"},
-                    "Text": {"Data": message,    "Charset": "UTF-8"},
-                },
-            },
-        )
-        log.info(f"Email sent to {len(recipients)} recipient(s). MessageId: {response['MessageId']}")
-    except ClientError as e:
-        log.error(f"SES send failed: {e.response['Error']['Message']}")
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
+            server.login(GMAIL_SENDER, GMAIL_APP_PASSWORD)
+            server.sendmail(GMAIL_SENDER, EMAIL_RECIPIENTS, msg.as_string())
+        log.info(f"Email sent to {len(EMAIL_RECIPIENTS)} recipient(s): {subject}")
 
-# ── SNS SMS Sender ────────────────────────────────────────────────────────────
-def send_sms(subject: str, message: str, severity: str):
-    """
-    Send SMS alert to all configured phone numbers via AWS SNS.
-    SMS is kept short — just the key facts, under 160 chars per segment.
-    """
-    recipients = RecipientConfig.get().get("sms", [])
-    if not recipients:
-        log.info("No SMS recipients configured, skipping SMS")
-        return
+    except smtplib.SMTPAuthenticationError:
+        log.error("Gmail authentication failed — check GMAIL_APP_PASSWORD")
+        log.error("Make sure you're using an App Password, not your Gmail login password")
+        log.error("Generate one at: myaccount.google.com → Security → App Passwords")
 
-    # Build concise SMS (160 char limit per segment)
-    # Extract first two lines of the message for brevity
-    lines    = [l.strip() for l in message.strip().split("\n") if l.strip()]
-    sms_body = f"[PuppyPi {severity}] {subject}\n" + "\n".join(lines[:2])
+    except smtplib.SMTPException as e:
+        log.error(f"SMTP error sending email: {e}")
 
-    if len(sms_body) > 155:
-        sms_body = sms_body[:152] + "..."
-
-    for phone in recipients:
-        try:
-            response = sns.publish(
-                PhoneNumber = phone,
-                Message     = sms_body,
-                MessageAttributes={
-                    "AWS.SNS.SMS.SMSType": {
-                        "DataType":    "String",
-                        "StringValue": "Transactional",  # Ensures high deliverability
-                    },
-                    "AWS.SNS.SMS.SenderID": {
-                        "DataType":    "String",
-                        "StringValue": "PuppyPi",        # Appears as sender name
-                    },
-                },
-            )
-            log.info(f"SMS sent to {phone}. MessageId: {response['MessageId']}")
-        except ClientError as e:
-            log.error(f"SNS SMS to {phone} failed: {e.response['Error']['Message']}")
+    except Exception as e:
+        log.error(f"Unexpected error sending email: {e}")
 
 # ── Main Alert Router ─────────────────────────────────────────────────────────
 class AlertRouter:
     """
-    Central alert dispatcher.
-    Called by mqtt_ingestion.py whenever a critical event occurs.
+    Central alert dispatcher called by cloud_subscriber.py.
 
     Usage:
         router = AlertRouter()
         router.send_alert(
             alert_type = "INTRUDER",
             subject    = "Intruder Detected",
-            message    = "Zone A, confidence 92%, 14:32 UTC",
+            message    = "Zone: Main\\nConfidence: 94%\\nTime: 14:32",
             severity   = "HIGH",
-            dedup_key  = "zone-A",    # optional: for rate limiting per zone
+            dedup_key  = "event-abc123",
         )
+
+    Severity routing:
+        CRITICAL / HIGH  → Email + console log
+        MEDIUM           → Email + console log
+        LOW              → Console log only
     """
 
     def send_alert(
@@ -286,52 +207,77 @@ class AlertRouter:
         severity:   str,
         dedup_key:  Optional[str] = None,
     ):
-        """
-        Route an alert to the appropriate channels based on severity.
-
-        Args:
-            alert_type : "INTRUDER", "HAZARD", or "SYSTEM"
-            subject    : Short alert title (used as email subject + SMS header)
-            message    : Full alert detail (newline-separated key-value pairs)
-            severity   : "CRITICAL", "HIGH", "MEDIUM", or "LOW"
-            dedup_key  : Optional key to scope rate limiting (e.g. zone name)
-        """
         key = dedup_key or alert_type
 
-        # Rate limit check
+        # Rate limit check — silently skip if within cooldown
         if not RateLimiter.should_send(alert_type, key):
             return
 
-        log.info(f"Routing alert: type={alert_type}, severity={severity}")
+        # Always log to console regardless of severity
+        log.warning(f"[{severity}] [{alert_type}] {subject}")
+        for line in message.strip().split("\n"):
+            log.warning(f"  {line}")
 
-        # CRITICAL / HIGH → SMS + Email
-        if severity in ("CRITICAL", "HIGH"):
-            send_sms(subject, message, severity)
-            send_email(subject, message, alert_type, severity)
+        # Email for CRITICAL / HIGH / MEDIUM
+        if severity in ("CRITICAL", "HIGH", "MEDIUM"):
+            _send_email(subject, message, alert_type, severity)
 
-        # MEDIUM / LOW → Email only
+        # LOW — console log only, no email
         else:
-            send_email(subject, message, alert_type, severity)
-
-        log.info(f"Alert dispatched: {alert_type} [{severity}]")
-
+            log.info(f"LOW severity alert logged only (no email): {subject}")
 
 # ── CLI Test ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    """Quick test — sends a test alert to verify SES/SNS setup."""
-    logging.basicConfig(level=logging.INFO)
+    """
+    Quick test — run this directly to verify your Gmail setup works:
+        python3 cloud/pipeline/alert_router.py
+    Check your inbox after running.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
+
     router = AlertRouter()
 
+    print("Sending test alerts...")
+
+    # Test HIGH — should send email
     router.send_alert(
         alert_type = "INTRUDER",
         subject    = "TEST — Intruder Detected",
         message    = (
             "Zone: Main Entrance\n"
             "Confidence: 94.2%\n"
-            "Time: 2025-01-01T12:00:00Z\n"
-            "Snapshot: s3://puppypi-events/snapshots/test.jpg"
+            "Time: 2025-01-01T12:00:00\n"
+            "Gas PPM: 145.0\n"
+            "Temp: 28.5°C"
         ),
         severity   = "HIGH",
-        dedup_key  = "test-zone",
+        dedup_key  = "test-intruder",
     )
-    print("Test alert sent. Check your email and phone.")
+
+    # Test CRITICAL — should send email
+    router.send_alert(
+        alert_type = "HAZARD",
+        subject    = "TEST — Critical Gas Level",
+        message    = (
+            "Gas level: 550.0 PPM (CRITICAL)\n"
+            "Temperature: 42.0°C\n"
+            "Time: 2025-01-01T12:00:05"
+        ),
+        severity   = "CRITICAL",
+        dedup_key  = "test-hazard",
+    )
+
+    # Test LOW — should only log, no email
+    router.send_alert(
+        alert_type = "SYSTEM",
+        subject    = "TEST — Low Battery",
+        message    = "Battery at 12%. Please recharge.",
+        severity   = "LOW",
+        dedup_key  = "test-battery",
+    )
+
+    print("\nDone. Check your inbox and console output above.")
+    print("If no email arrived, check GMAIL_SENDER and GMAIL_APP_PASSWORD config.")
