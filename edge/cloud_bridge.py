@@ -1,14 +1,14 @@
 """
 edge/cloud_bridge.py
 ====================
-Wraps PuppyPiStartupApp with MQTT publishing.
+Wraps FullEdgePipelineApp with MQTT publishing.
 Does NOT modify any existing functions.
 
 Publishes to the LOCAL Mosquitto broker running on the PuppyPi (port 1883).
 The cloud subscriber (on your laptop) connects to this same broker
 via the PuppyPi hotspot IP (192.168.149.1:1883).
 
-Run instead of main_puppypi_startup.py:
+Run instead of edge/run_edge_full_pipeline.py:
   python3 edge/cloud_bridge.py --camera-index 2 --headless
 """
 
@@ -27,7 +27,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import paho.mqtt.client as mqtt
-from main_puppypi_startup import PuppyPiStartupApp, parse_args
+from edge.run_edge_full_pipeline import FullEdgePipelineApp, parse_args
 
 log = logging.getLogger("cloud_bridge")
 
@@ -52,7 +52,7 @@ class EdgeMQTTPublisher:
     its public/semi-public attributes.
     """
 
-    def __init__(self, app: PuppyPiStartupApp):
+    def __init__(self, app: FullEdgePipelineApp):
         self._app     = app
         self._client  = mqtt.Client(client_id="puppypi-edge-publisher")
         self._running = False
@@ -116,11 +116,11 @@ class EdgeMQTTPublisher:
 
     def _publish_telemetry(self):
         """
-        Read _last_temp_record and _last_gas_record from the running app
+        Read _last_temp and _last_gas from the running app
         and publish as a single telemetry message.
         """
-        temp = self._app._last_temp_record
-        gas  = self._app._last_gas_record
+        temp = self._app._last_temp
+        gas = self._app._last_gas
 
         payload = {
             "event_id":  str(uuid.uuid4()),
@@ -185,9 +185,9 @@ class EdgeMQTTPublisher:
                     "snapshot_b64": b64_image,
                     "snapshot_path": str(snap_path),
                     # Include latest sensor readings at time of intrusion
-                    "gas_ppm":  self._app._last_gas_record.get("payload", {}).get("ppm") if self._app._last_gas_record else None,
-                    "temp_c":   self._app._last_temp_record.get("payload", {}).get("temperature_c") if self._app._last_temp_record else None,
-                }
+            "gas_ppm":  self._app._last_gas.get("payload", {}).get("ppm") if self._app._last_gas else None,
+            "temp_c":   self._app._last_temp.get("payload", {}).get("temperature_c") if self._app._last_temp else None,
+        }
 
                 self._client.publish(
                     TOPIC_INTRUSION,
@@ -211,10 +211,10 @@ class EdgeMQTTPublisher:
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-class CloudBridgeApp(PuppyPiStartupApp):
+class CloudBridgeApp(FullEdgePipelineApp):
     """
-    PuppyPiStartupApp + MQTT publishing side-car.
-    Inherits everything from PuppyPiStartupApp unchanged.
+    FullEdgePipelineApp + MQTT publishing side-car.
+    Inherits everything from FullEdgePipelineApp unchanged.
     Only adds: start/stop the EdgeMQTTPublisher alongside the existing lifecycle.
     """
 
@@ -237,15 +237,40 @@ def main():
 
     app = CloudBridgeApp(
         camera_index=args.camera_index,
-        camera_width=args.width,
-        camera_height=args.height,
-        camera_fps=args.fps,
+        width=args.width,
+        height=args.height,
+        fps=args.fps,
         model_path=args.model_path,
-        person_confidence=args.confidence,
-        gas_ports=args.gas_ports,
-        servo_channel=args.servo_channel,
-        camera_start_servo_pulse=args.camera_start_servo_pulse,
+        confidence=args.confidence,
+        servo_id=args.servo_id,
+        servo_mode=args.servo_mode,
+        servo_direction=args.servo_direction,
+        infer_width=args.infer_width,
+        infer_height=args.infer_height,
+        infer_interval_s=args.infer_interval,
+        force_infer_interval_s=args.force_infer_interval,
+        max_loop_fps=args.max_loop_fps,
+        disable_motion_gate=args.disable_motion_gate,
+        disable_inference=args.disable_inference,
+        disable_overlays=args.disable_overlays,
+        render_every_n=args.render_every_n,
+        profile_perf=args.profile_perf,
+        track_person=args.track_person,
+        track_deadband_px=args.track_deadband_px,
+        track_max_step=args.track_max_step,
+        track_interval_s=args.track_interval,
+        enable_mobility=args.enable_mobility,
+        approach_on_detect=args.approach_on_detect,
+        approach_close_bbox_height_px=args.approach_close_bbox_height,
+        teleop_speed_x=args.teleop_speed_x,
+        teleop_yaw_deg_s=args.teleop_yaw_deg_s,
+        teleop_hold_timeout_s=args.teleop_hold_timeout,
+        gait_mode=args.gait_mode,
+        wrist_servo_id=args.wrist_servo_id,
+        wrist_start_pulse=args.wrist_start_pulse,
+        wrist_on_start=not args.disable_wrist_on_start,
         show_window=not args.headless,
+        auto_sweep=args.auto_sweep,
     )
 
     app.run_forever()
