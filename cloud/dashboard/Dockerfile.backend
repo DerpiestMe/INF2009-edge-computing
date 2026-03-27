@@ -11,3 +11,5 @@ COPY websocket_server.py .
 COPY stream_server.py .
 
 EXPOSE 8765 8766
+
+CMD ["python3", "websocket_server.py"]
