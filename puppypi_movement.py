@@ -254,16 +254,18 @@ class PuppyPiMovementController:
         frame_cx = frame_width / 2.0
         error_px = person_cx - frame_cx
         error_norm = max(-1.0, min(1.0, error_px / max(1.0, frame_cx)))
-        close_enough = bbox_h >= float(close_bbox_height_px)
-        if close_enough:
-            self.send_velocity(0.0, 0.0, 0.0, record=False)
-            return True
 
         servo_error_norm = 0.0
         if None not in (servo_current_pulse, servo_center_pulse, servo_min_pulse, servo_max_pulse):
             half_span = max(1.0, (float(servo_max_pulse) - float(servo_min_pulse)) / 2.0)
             servo_error_norm = (float(servo_current_pulse) - float(servo_center_pulse)) / half_span
             servo_error_norm = max(-1.0, min(1.0, servo_error_norm))
+
+        centered = abs(error_norm) <= 0.12 and abs(servo_error_norm) <= max(0.05, float(servo_align_deadband_ratio))
+        close_enough = bbox_h >= float(close_bbox_height_px) and centered
+        if close_enough:
+            self.send_velocity(0.0, 0.0, 0.0, record=False)
+            return True
 
         # Blend image error with camera-servo offset; servo offset dominates heading control.
         body_error_norm = max(-1.0, min(1.0, 0.75 * servo_error_norm + 0.25 * error_norm))

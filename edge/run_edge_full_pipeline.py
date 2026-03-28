@@ -161,6 +161,7 @@ class FullEdgePipelineApp:
         self._teleop_last_input_ts = 0.0
         self._manual_drive_until_ts = 0.0
         self._last_approach_log_ts = 0.0
+        self._last_approach_state_log_ts = 0.0
 
     def start(self) -> None:
         self._running = True
@@ -212,6 +213,8 @@ class FullEdgePipelineApp:
         )
         self._logger.info("Mobility gait mode: %s", self.gait_mode)
         self._logger.info("Mobility body height: %.2f", self._movement.body_height)
+        if self.approach_on_detect and not self.enable_mobility:
+            self._logger.warning("approach-on-detect requested but mobility is disabled; enable with --enable-mobility")
         if self.enable_mobility:
             self._logger.info(
                 "Mobility keys: hold i/k forward/back, hold j/l turn left/right, <space> stop, r record toggle, p replay, h go_home"
@@ -483,20 +486,26 @@ class FullEdgePipelineApp:
                 if tracking_active:
                     self._track_first_person(detections, frame_width=frame_w, force=approach_tracking)
 
-                manual_override = self.enable_mobility and (self._movement.recording or self._movement.replaying)
+                approach_state = "idle"
+                manual_override = self.enable_mobility and self._movement.replaying
                 manual_drive_active = self.enable_mobility and (time.time() < self._manual_drive_until_ts)
                 if manual_override and self._approach_active:
                     self._logger.info("Approach paused: manual record/replay override active")
+                    approach_state = "paused_replay"
                 if manual_drive_active and self._approach_active:
                     self._movement.stop()
                     self._approach_active = False
                     self._logger.info("Approach paused: manual teleop override active")
+                    approach_state = "paused_manual_teleop"
+                if self.enable_mobility and self.approach_on_detect and len(detections) > 0 and self._movement.recording:
+                    self._movement.stop_recording()
+                    self._logger.info("Approach: auto-stopped recording so approach controller can take over")
                 if self.enable_mobility and self.approach_on_detect and len(detections) > 0 and not manual_override and not manual_drive_active:
                     if not self._approach_active:
                         self._movement.stop_replay()
-                        self._movement.stop_recording()
                         self._logger.info("Person detected: switching to approach mode")
                         self._approach_active = True
+                    approach_state = "approach_active"
                     close_enough = self._movement.approach_person(
                         detections[0],
                         frame_width=frame_w,
@@ -523,15 +532,32 @@ class FullEdgePipelineApp:
                     if close_enough:
                         self._movement.stop()
                         self._logger.info("Approach complete: target is close enough for face capture")
+                        approach_state = "approach_complete"
                 elif self.enable_mobility and self._approach_active and (len(detections) == 0 or manual_override or manual_drive_active):
                     self._movement.stop()
                     self._approach_active = False
+                    approach_state = "approach_stopped_no_target_or_override"
+                elif self.enable_mobility and self.approach_on_detect and len(detections) == 0:
+                    approach_state = "waiting_for_person_detection"
 
                 if self.enable_mobility and not self._approach_active and not self._movement.replaying:
                     now_teleop = time.time()
                     if now_teleop - self._teleop_last_input_ts > self.teleop_hold_timeout_s:
                         self._teleop_active_x, self._teleop_active_yaw = 0.0, 0.0
                     self._movement.send_velocity(self._teleop_active_x, 0.0, self._teleop_active_yaw)
+                if self.enable_mobility and self.approach_on_detect:
+                    now_state = time.time()
+                    if now_state - self._last_approach_state_log_ts >= 1.0:
+                        self._logger.info(
+                            "Approach state=%s detections=%s replay=%s recording=%s manual_drive=%s active=%s",
+                            approach_state,
+                            len(detections),
+                            self._movement.replaying,
+                            self._movement.recording,
+                            manual_drive_active,
+                            self._approach_active,
+                        )
+                        self._last_approach_state_log_ts = now_state
 
                 if self.auto_sweep and not tracking_active:
                     self.servo.sweep_tick(
