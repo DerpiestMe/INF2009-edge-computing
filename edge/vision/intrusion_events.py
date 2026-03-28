@@ -1,3 +1,4 @@
+import logging
 import time
 from collections import deque
 from pathlib import Path
@@ -73,14 +74,16 @@ class IntrusionEventManager:
         cooldown_seconds: float = 5.0,
         snapshot_dir: str = "snapshots",
     ) -> None:
+        self._logger = logging.getLogger(self.__class__.__name__)
         self.confirm_frames = confirm_frames
         self.cooldown_seconds = cooldown_seconds
         self.snapshot_dir = Path(snapshot_dir)
-        self.snapshot_dir.mkdir(exist_ok=True)
+        self.snapshot_dir.mkdir(parents=True, exist_ok=True)
 
         self._intrusion_counter = 0
         self._last_event_ts = 0.0
         self._frame_history: deque = deque(maxlen=confirm_frames)
+        self._event_seq = 0
 
     def process(self, frame, detections: List[Dict]) -> Optional[Dict]:
         """
@@ -107,8 +110,13 @@ class IntrusionEventManager:
                 self._intrusion_counter = 0
 
                 # Save snapshot
-                snapshot_path = self.snapshot_dir / f"intrusion_{int(now)}_{self._intrusion_counter}.jpg"
-                cv2.imwrite(str(snapshot_path), frame)
+                self._event_seq += 1
+                snapshot_path = self.snapshot_dir / f"intrusion_{int(now)}_{self._event_seq}.jpg"
+                saved = bool(cv2.imwrite(str(snapshot_path), frame))
+                if saved:
+                    self._logger.info("Saved intrusion snapshot: %s", snapshot_path)
+                else:
+                    self._logger.warning("Failed to save intrusion snapshot: %s", snapshot_path)
 
                 intrusion_in_zone = [det for det in detections if det.get("inside_zone")]
                 event = {
@@ -117,6 +125,7 @@ class IntrusionEventManager:
                     "zone_id": intrusion_in_zone[0].get("zone_id") if intrusion_in_zone else None,
                     "num_persons": len(intrusion_in_zone),
                     "snapshot_path": str(snapshot_path),
+                    "snapshot_saved": saved,
                     "confirm_frames": self.confirm_frames,
                 }
                 return event

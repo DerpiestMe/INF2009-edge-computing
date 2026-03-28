@@ -193,6 +193,7 @@ class FullEdgePipelineApp:
             self.disable_overlays,
             self.render_every_n,
         )
+        self._logger.info("Snapshot output directory: %s", self.events.snapshot_dir)
         self._logger.info(
             "Tracking: enabled=%s deadband_px=%s max_step=%s interval=%.2fs",
             self.track_person,
