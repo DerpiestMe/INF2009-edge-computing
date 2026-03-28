@@ -4,12 +4,11 @@ edge/cloud_bridge.py
 Wraps FullEdgePipelineApp with MQTT publishing.
 Does NOT modify any existing functions.
 
-Publishes to the LOCAL Mosquitto broker running on the PuppyPi (port 1883).
-The cloud subscriber (on your laptop) connects to this same broker
-via the PuppyPi hotspot IP (192.168.149.1:1883).
+Publishes to the Mosquitto broker running on your LAPTOP (cloud side).
+Set MQTT_BROKER_HOST to the laptop's hotspot/LAN IP if needed.
 
-Run instead of edge/run_edge_full_pipeline.py:
-  python3 edge/cloud_bridge.py --camera-index 2 --headless
+Run on the PuppyPi instead of edge/run_edge_full_pipeline.py:
+  MQTT_BROKER_HOST=192.168.x.x python3 edge/cloud_bridge.py --camera-index 2 --headless
 """
 
 import json
@@ -19,6 +18,7 @@ import base64
 import logging
 import threading
 import argparse
+import os
 from pathlib import Path
 import sys
 
@@ -32,9 +32,10 @@ from edge.run_edge_full_pipeline import FullEdgePipelineApp, parse_args
 log = logging.getLogger("cloud_bridge")
 
 # ── Config ────────────────────────────────────────────────────────────────────
-# This is the local Mosquitto broker running ON THE PUPPYPI itself
-MQTT_BROKER_HOST     = "localhost"   # we're running ON the PuppyPi
-MQTT_BROKER_PORT     = 1883
+# Mosquitto broker runs on the laptop (cloud). Default to hotspot IP.
+# Override with env if your laptop uses a different address.
+MQTT_BROKER_HOST     = os.getenv("MQTT_BROKER_HOST", "192.168.149.1")
+MQTT_BROKER_PORT     = int(os.getenv("MQTT_BROKER_PORT", "1883"))
 TELEMETRY_INTERVAL_S = 5.0          # publish sensor readings every 5s
 SNAPSHOT_DIR         = Path("snapshots")  # where intrusion_events saves clean frames
 

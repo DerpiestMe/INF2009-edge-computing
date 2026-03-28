@@ -11,6 +11,7 @@ services:
         dockerfile: Dockerfile.backend
       command: python websocket_server.py
       ports: ["8765:8765"]
+      env_file: .env
       depends_on: [mosquitto]
 
   stream_server:
@@ -19,6 +20,7 @@ services:
         dockerfile: Dockerfile.backend
       command: python stream_server.py
       ports: ["8766:8766"]
+      env_file: .env
       depends_on: [mosquitto]
 
   dashboard:
@@ -27,6 +29,7 @@ services:
         dockerfile: Dockerfile.frontend
       ports: ["3000:3000"]
       command: npm run dev -- --host
+      env_file: .env
 
   influxdb:
     image: influxdb:2

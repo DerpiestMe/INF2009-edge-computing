@@ -1,17 +1,15 @@
 """
 cloud/pipeline/cloud_subscriber.py
 ====================================
-Runs on YOUR LAPTOP (connected to PuppyPi hotspot).
-Subscribes to the PuppyPi's local Mosquitto broker and handles:
+Runs on YOUR LAPTOP (cloud side).
+Subscribes to the MQTT broker running on your laptop and handles:
   1. Storing telemetry to InfluxDB (already in docker-compose)
   2. Running YOLOv8-Large re-ID on intrusion snapshots
   3. Routing email/SMS alerts via alert_router.py
 
-MQTT broker is the PuppyPi's own Mosquitto.
-Connect your laptop to PuppyPi hotspot first, then run:
+MQTT broker is on your laptop (see docker-compose).
+Run this on the laptop:
   python3 cloud/pipeline/cloud_subscriber.py
-
-Default PuppyPi hotspot IP: 192.168.149.1
 """
 
 import json
@@ -20,6 +18,7 @@ import time
 import logging
 import tempfile
 import threading
+import os
 from pathlib import Path
 from queue import Queue, Empty
 
@@ -34,15 +33,16 @@ log = logging.getLogger("cloud_subscriber")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
 # ── Config ────────────────────────────────────────────────────────────────────
-# PuppyPi hotspot IP — your laptop connects to PuppyPi WiFi
-MQTT_BROKER_HOST = "192.168.149.1"   # PuppyPi default hotspot IP
-MQTT_BROKER_PORT = 1883
+# MQTT broker runs on the laptop (cloud). Default to localhost.
+# Override with env if you run the broker elsewhere.
+MQTT_BROKER_HOST = os.getenv("MQTT_BROKER_HOST", "localhost")
+MQTT_BROKER_PORT = int(os.getenv("MQTT_BROKER_PORT", "1883"))
 
 # InfluxDB running on YOUR LAPTOP via docker-compose
-INFLUX_URL    = "http://localhost:8086"
-INFLUX_TOKEN  = "your-influxdb-token"   # set during InfluxDB setup
-INFLUX_ORG    = "puppypi"
-INFLUX_BUCKET = "puppypi-data"
+INFLUX_URL    = os.getenv("INFLUX_URL", "http://localhost:8086")
+INFLUX_TOKEN  = os.getenv("INFLUX_TOKEN", "your-influxdb-token")   # set during InfluxDB setup
+INFLUX_ORG    = os.getenv("INFLUX_ORG", "puppypi")
+INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "puppypi-data")
 
 TOPICS = [
     ("puppypi/sensors/telemetry", 0),
@@ -68,7 +68,7 @@ class InfluxWriter:
                 .tag("device_id", payload.get("device_id", "puppypi-01"))
                 .field("ppm", float(payload["gas_ppm"]))
                 .field("severity", payload.get("gas_severity", "NORMAL"))
-                .time(ts, WritePrecision.SECONDS)
+                .time(ts, WritePrecision.S)
             )
             self._write_api.write(bucket=INFLUX_BUCKET, record=point)
 
@@ -78,7 +78,7 @@ class InfluxWriter:
                 .tag("device_id", payload.get("device_id", "puppypi-01"))
                 .field("temp_c",   float(payload["temp_c"]))
                 .field("humidity", float(payload.get("humidity", 0)))
-                .time(ts, WritePrecision.SECONDS)
+                .time(ts, WritePrecision.S)
             )
             self._write_api.write(bucket=INFLUX_BUCKET, record=point)
 
