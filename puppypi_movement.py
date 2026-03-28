@@ -33,12 +33,15 @@ class PuppyPiMovementController:
         max_x_cm_s: float = 20.0,
         max_yaw_rate_rad_s: float = math.radians(30.0),
         gait_mode: str = "walk",
+        body_height: float = -10.0,
     ) -> None:
         self.node_name = node_name
         self.velocity_topic = velocity_topic
         self.max_x_cm_s = float(max_x_cm_s)
         self.max_yaw_rate_rad_s = float(max_yaw_rate_rad_s)
         self.gait_mode = str(gait_mode).lower()
+        # More negative values generally lower the body. Keep conservative bounds.
+        self.body_height = max(-16.0, min(-5.0, float(body_height)))
 
         self._logger = logging.getLogger(self.__class__.__name__)
         self._rospy = None
@@ -123,7 +126,7 @@ class PuppyPiMovementController:
             "stance_x": 0.0,
             "stance_y": 0.0,
             "x_shift": -0.65,
-            "height": -10.0,
+            "height": self.body_height,
             "roll": 0.0,
             "pitch": 0.0,
             "yaw": 0.0,
@@ -143,12 +146,18 @@ class PuppyPiMovementController:
             "z_clearance": profile["z_clearance"],
         }
         try:
+            self._logger.info("Applying pose: gait=%s height=%.2f x_shift=%.2f", self.gait_mode, pose["height"], pose["x_shift"])
             self._pose_pub.publish(**pose)
             self._rospy.sleep(0.15)
             self._gait_pub.publish(**gait)
             self._rospy.sleep(0.15)
         except Exception as exc:
             self._logger.warning("Failed to publish default pose/gait: %s", exc)
+
+    def set_body_height(self, body_height: float) -> None:
+        self.body_height = max(-16.0, min(-5.0, float(body_height)))
+        if self._ready:
+            self._publish_default_pose_and_gait()
 
     def set_gait_mode(self, gait_mode: str) -> None:
         self.gait_mode = str(gait_mode).lower()

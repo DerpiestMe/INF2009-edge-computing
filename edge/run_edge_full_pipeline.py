@@ -60,6 +60,7 @@ class FullEdgePipelineApp:
         teleop_yaw_deg_s: float = 12.0,
         teleop_hold_timeout_s: float = 0.18,
         gait_mode: str = "walk",
+        body_height: float = -10.0,
         wrist_servo_id: int = 10,
         wrist_start_pulse: int = 1100,
         wrist_on_start: bool = True,
@@ -91,6 +92,7 @@ class FullEdgePipelineApp:
         self.teleop_yaw_rate = float(teleop_yaw_deg_s) * (3.141592653589793 / 180.0)
         self.teleop_hold_timeout_s = max(0.05, float(teleop_hold_timeout_s))
         self.gait_mode = str(gait_mode).lower()
+        self.body_height = float(body_height)
         self.wrist_servo_id = int(wrist_servo_id)
         self.wrist_start_pulse = int(wrist_start_pulse)
         self.wrist_on_start = bool(wrist_on_start)
@@ -151,6 +153,7 @@ class FullEdgePipelineApp:
             max_x_cm_s=max(5.0, self.teleop_speed_x),
             max_yaw_rate_rad_s=max(0.2, self.teleop_yaw_rate),
             gait_mode=self.gait_mode,
+            body_height=self.body_height,
         )
         self._approach_active = False
         self._teleop_active_x = 0.0
@@ -205,6 +208,7 @@ class FullEdgePipelineApp:
             self.teleop_yaw_rate * 180.0 / 3.141592653589793,
         )
         self._logger.info("Mobility gait mode: %s", self.gait_mode)
+        self._logger.info("Mobility body height: %.2f", self._movement.body_height)
         if self.enable_mobility:
             self._logger.info(
                 "Mobility keys: hold i/k forward/back, hold j/l turn left/right, <space> stop, r record toggle, p replay, h go_home"
@@ -585,6 +589,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--teleop-yaw-deg-s", type=float, default=12.0)
     parser.add_argument("--teleop-hold-timeout", type=float, default=0.18)
     parser.add_argument("--gait-mode", choices=["walk", "amble", "trot"], default="walk")
+    parser.add_argument("--body-height", type=float, default=-10.0, help="Robot body height for gait pose (typical range: -16..-5)")
     parser.add_argument("--wrist-servo-id", type=int, default=10)
     parser.add_argument("--wrist-start-pulse", type=int, default=1100)
     parser.add_argument("--disable-wrist-on-start", action="store_true")
@@ -632,6 +637,7 @@ def main() -> None:
         teleop_yaw_deg_s=args.teleop_yaw_deg_s,
         teleop_hold_timeout_s=args.teleop_hold_timeout,
         gait_mode=args.gait_mode,
+        body_height=args.body_height,
         wrist_servo_id=args.wrist_servo_id,
         wrist_start_pulse=args.wrist_start_pulse,
         wrist_on_start=not args.disable_wrist_on_start,
