@@ -189,22 +189,27 @@ class PuppyPiMovementController:
         self._recording = True
         self._last_record_ts = time.time()
         self._logger.info("Movement recording started")
+        print("[PUPPYPI] Movement recording started")
 
     def stop_recording(self) -> None:
         self._recording = False
         self._logger.info("Movement recording stopped (%s steps)", len(self._recorded_steps))
+        print("[PUPPYPI] Movement recording stopped (%s steps)" % (len(self._recorded_steps),))
 
     def replay_recording(self, blocking: bool = False) -> None:
         if not self._recorded_steps:
             self._logger.info("No recorded movement steps to replay")
+            print("[PUPPYPI] No recorded movement steps to replay")
             return
         self._replay_stop = False
         if self._replay_thread is not None and self._replay_thread.is_alive():
             self._logger.info("Replay already running")
+            print("[PUPPYPI] Replay already running")
             return
 
         def _run_replay() -> None:
             self._logger.info("Replay started (%s steps)", len(self._recorded_steps))
+            print("[PUPPYPI] Replay started (%s steps)" % (len(self._recorded_steps),))
             for step in self._recorded_steps:
                 if self._replay_stop:
                     break
@@ -212,6 +217,7 @@ class PuppyPiMovementController:
                 time.sleep(step.dt)
             self.stop()
             self._logger.info("Replay finished")
+            print("[PUPPYPI] Replay finished")
 
         if blocking:
             _run_replay()
@@ -230,6 +236,11 @@ class PuppyPiMovementController:
         frame_height: int,
         close_bbox_height_px: int = 180,
         max_forward_cm_s: float = 6.0,
+        servo_current_pulse: Optional[int] = None,
+        servo_center_pulse: Optional[int] = None,
+        servo_min_pulse: Optional[int] = None,
+        servo_max_pulse: Optional[int] = None,
+        servo_align_deadband_ratio: float = 0.08,
     ) -> bool:
         """
         Orient and approach person until close enough.
@@ -243,14 +254,30 @@ class PuppyPiMovementController:
         frame_cx = frame_width / 2.0
         error_px = person_cx - frame_cx
         error_norm = max(-1.0, min(1.0, error_px / max(1.0, frame_cx)))
-
-        yaw_cmd = error_norm * self.max_yaw_rate_rad_s
         close_enough = bbox_h >= float(close_bbox_height_px)
         if close_enough:
             self.send_velocity(0.0, 0.0, 0.0, record=False)
             return True
 
-        # Slow approach while turning to center target.
-        forward = max(1.0, min(max_forward_cm_s, (1.0 - abs(error_norm)) * max_forward_cm_s))
+        servo_error_norm = 0.0
+        if None not in (servo_current_pulse, servo_center_pulse, servo_min_pulse, servo_max_pulse):
+            half_span = max(1.0, (float(servo_max_pulse) - float(servo_min_pulse)) / 2.0)
+            servo_error_norm = (float(servo_current_pulse) - float(servo_center_pulse)) / half_span
+            servo_error_norm = max(-1.0, min(1.0, servo_error_norm))
+
+        # Blend image error with camera-servo offset; servo offset dominates heading control.
+        body_error_norm = max(-1.0, min(1.0, 0.75 * servo_error_norm + 0.25 * error_norm))
+        yaw_cmd = body_error_norm * self.max_yaw_rate_rad_s
+        align_only = abs(servo_error_norm) > max(0.02, float(servo_align_deadband_ratio))
+
+        if align_only:
+            # First rotate in place until body heading roughly matches camera heading.
+            self.send_velocity(0.0, 0.0, yaw_cmd, record=False)
+            return False
+
+        # Then move forward with smaller turn corrections.
+        turn_penalty = min(1.0, abs(body_error_norm))
+        forward_gain = max(0.25, 1.0 - (0.75 * turn_penalty))
+        forward = max(1.0, min(max_forward_cm_s, forward_gain * max_forward_cm_s))
         self.send_velocity(forward, 0.0, yaw_cmd, record=False)
         return False

@@ -159,6 +159,7 @@ class FullEdgePipelineApp:
         self._teleop_active_x = 0.0
         self._teleop_active_yaw = 0.0
         self._teleop_last_input_ts = 0.0
+        self._last_approach_log_ts = 0.0
 
     def start(self) -> None:
         self._running = True
@@ -271,11 +272,19 @@ class FullEdgePipelineApp:
         elif self.enable_mobility and key_ch == "r":
             if self._movement.recording:
                 self._movement.stop_recording()
+                print("[MOBILITY] Recording stopped")
+                self._logger.info("Recording stopped")
             else:
                 self._movement.start_recording(clear_existing=True)
+                print("[MOBILITY] Recording started")
+                self._logger.info("Recording started")
         elif self.enable_mobility and key_ch == "p":
+            print("[MOBILITY] Replay requested")
+            self._logger.info("Replay requested")
             self._movement.replay_recording(blocking=False)
         elif self.enable_mobility and key_ch == "h":
+            print("[MOBILITY] Go-home requested")
+            self._logger.info("Go-home requested")
             self._movement.go_home()
         return True
 
@@ -290,8 +299,8 @@ class FullEdgePipelineApp:
         if self._last_gas is not None and "ppm" in self._last_gas.get("payload", {}):
             print(f"[GAS] {self._last_gas['payload']['ppm']:.2f} ppm")
 
-    def _track_first_person(self, detections: List[Dict[str, Any]], frame_width: int) -> None:
-        if not self.track_person or not detections:
+    def _track_first_person(self, detections: List[Dict[str, Any]], frame_width: int, force: bool = False) -> None:
+        if (not self.track_person and not force) or not detections:
             return
         now = time.time()
         if now - self._last_track_ts < self.track_interval_s:
@@ -453,8 +462,10 @@ class FullEdgePipelineApp:
                     print("INTRUSION EVENT")
                     print(json.dumps(event, indent=2))
 
-                tracking_active = self.track_person and len(detections) > 0
-                self._track_first_person(detections, frame_width=frame_w)
+                approach_tracking = self.enable_mobility and self.approach_on_detect and len(detections) > 0
+                tracking_active = (self.track_person or approach_tracking) and len(detections) > 0
+                if tracking_active:
+                    self._track_first_person(detections, frame_width=frame_w, force=approach_tracking)
 
                 manual_override = self.enable_mobility and (self._movement.recording or self._movement.replaying)
                 if manual_override and self._approach_active:
@@ -471,7 +482,23 @@ class FullEdgePipelineApp:
                         frame_height=frame_h,
                         close_bbox_height_px=self.approach_close_bbox_height_px,
                         max_forward_cm_s=self.teleop_speed_x,
+                        servo_current_pulse=self.servo.current_pulse,
+                        servo_center_pulse=self.servo.center_pulse,
+                        servo_min_pulse=self.servo.min_pulse,
+                        servo_max_pulse=self.servo.max_pulse,
                     )
+                    now_approach = time.time()
+                    if now_approach - self._last_approach_log_ts >= 1.0:
+                        bbox_h = int(detections[0]["bbox"][3] - detections[0]["bbox"][1])
+                        self._logger.info(
+                            "Approach metrics: bbox_h=%s/%s servo_pulse=%s center=%s close=%s",
+                            bbox_h,
+                            self.approach_close_bbox_height_px,
+                            self.servo.current_pulse,
+                            self.servo.center_pulse,
+                            close_enough,
+                        )
+                        self._last_approach_log_ts = now_approach
                     if close_enough:
                         self._movement.stop()
                         self._logger.info("Approach complete: target is close enough for face capture")
@@ -521,13 +548,12 @@ class FullEdgePipelineApp:
                 )
 
                 self._loop_counter += 1
-                if self.show_window and (self._loop_counter % self.render_every_n == 0):
-                    cv2.imshow("Edge Full Pipeline", display)
+                if self.show_window:
+                    if self._loop_counter % self.render_every_n == 0:
+                        cv2.imshow("Edge Full Pipeline", display)
                     key = cv2.waitKey(1) & 0xFF
-                    if not self._handle_key(key):
+                    if key != 255 and not self._handle_key(key):
                         break
-                elif self.show_window:
-                    cv2.waitKey(1)
 
                 if self.profile_perf:
                     self._perf_accum["capture_ms"] += capture_ms
