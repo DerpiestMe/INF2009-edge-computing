@@ -159,6 +159,7 @@ class FullEdgePipelineApp:
         self._teleop_active_x = 0.0
         self._teleop_active_yaw = 0.0
         self._teleop_last_input_ts = 0.0
+        self._manual_drive_until_ts = 0.0
         self._last_approach_log_ts = 0.0
 
     def start(self) -> None:
@@ -244,6 +245,11 @@ class FullEdgePipelineApp:
         if 0 <= key <= 255:
             key_ch = chr(key).lower()
         now = time.time()
+        movement_keys = {"i", "j", "k", "l", "r", "p", "h"}
+        if self.enable_mobility and key_ch in movement_keys and not self._movement.is_ready:
+            print("[MOBILITY] Movement stack not ready (check ROS sourcing and puppy_control workspace)")
+            self._logger.warning("Mobility key '%s' ignored: movement stack not ready", key_ch)
+            return True
 
         if key_ch == "s":
             self.auto_sweep = not self.auto_sweep
@@ -256,18 +262,23 @@ class FullEdgePipelineApp:
         elif self.enable_mobility and key_ch == "i":
             self._teleop_active_x, self._teleop_active_yaw = self.teleop_speed_x, 0.0
             self._teleop_last_input_ts = now
+            self._manual_drive_until_ts = now + max(0.5, self.teleop_hold_timeout_s * 2.0)
         elif self.enable_mobility and key_ch == "k":
             self._teleop_active_x, self._teleop_active_yaw = -self.teleop_speed_x, 0.0
             self._teleop_last_input_ts = now
+            self._manual_drive_until_ts = now + max(0.5, self.teleop_hold_timeout_s * 2.0)
         elif self.enable_mobility and key_ch == "j":
             self._teleop_active_x, self._teleop_active_yaw = 0.0, self.teleop_yaw_rate
             self._teleop_last_input_ts = now
+            self._manual_drive_until_ts = now + max(0.5, self.teleop_hold_timeout_s * 2.0)
         elif self.enable_mobility and key_ch == "l":
             self._teleop_active_x, self._teleop_active_yaw = 0.0, -self.teleop_yaw_rate
             self._teleop_last_input_ts = now
+            self._manual_drive_until_ts = now + max(0.5, self.teleop_hold_timeout_s * 2.0)
         elif self.enable_mobility and key == ord(" "):
             self._teleop_active_x, self._teleop_active_yaw = 0.0, 0.0
             self._teleop_last_input_ts = now
+            self._manual_drive_until_ts = now + 0.1
             self._movement.stop()
         elif self.enable_mobility and key_ch == "r":
             if self._movement.recording:
@@ -279,6 +290,10 @@ class FullEdgePipelineApp:
                 print("[MOBILITY] Recording started")
                 self._logger.info("Recording started")
         elif self.enable_mobility and key_ch == "p":
+            # Prevent stale teleop command from fighting replay thread.
+            self._teleop_active_x, self._teleop_active_yaw = 0.0, 0.0
+            self._teleop_last_input_ts = now
+            self._manual_drive_until_ts = now + 0.1
             print("[MOBILITY] Replay requested")
             self._logger.info("Replay requested")
             self._movement.replay_recording(blocking=False)
@@ -468,9 +483,14 @@ class FullEdgePipelineApp:
                     self._track_first_person(detections, frame_width=frame_w, force=approach_tracking)
 
                 manual_override = self.enable_mobility and (self._movement.recording or self._movement.replaying)
+                manual_drive_active = self.enable_mobility and (time.time() < self._manual_drive_until_ts)
                 if manual_override and self._approach_active:
                     self._logger.info("Approach paused: manual record/replay override active")
-                if self.enable_mobility and self.approach_on_detect and len(detections) > 0 and not manual_override:
+                if manual_drive_active and self._approach_active:
+                    self._movement.stop()
+                    self._approach_active = False
+                    self._logger.info("Approach paused: manual teleop override active")
+                if self.enable_mobility and self.approach_on_detect and len(detections) > 0 and not manual_override and not manual_drive_active:
                     if not self._approach_active:
                         self._movement.stop_replay()
                         self._movement.stop_recording()
@@ -502,11 +522,11 @@ class FullEdgePipelineApp:
                     if close_enough:
                         self._movement.stop()
                         self._logger.info("Approach complete: target is close enough for face capture")
-                elif self.enable_mobility and self._approach_active and (len(detections) == 0 or manual_override):
+                elif self.enable_mobility and self._approach_active and (len(detections) == 0 or manual_override or manual_drive_active):
                     self._movement.stop()
                     self._approach_active = False
 
-                if self.enable_mobility and not self._approach_active:
+                if self.enable_mobility and not self._approach_active and not self._movement.replaying:
                     now_teleop = time.time()
                     if now_teleop - self._teleop_last_input_ts > self.teleop_hold_timeout_s:
                         self._teleop_active_x, self._teleop_active_yaw = 0.0, 0.0
