@@ -142,40 +142,99 @@ Expected temperature/humidity I2C address: `0x38`.
 - If using `docker cp` workflow, recopy when host files change.
 - If using bind mount workflow, edits on host appear in container immediately.
 
-Setup for laptop as cloud
-On laptop (Cloud side)
-1. Edit .env
-Set a real INFLUX_TOKEn from InfluxDB UI (localhost:8086 after docker service is running)
+## Cloud-on-Laptop Setup (Current Architecture)
 
-2. Start cloud services
-docker-compose up -d mosquitto influxdb grafana dashboard websocket_server stream_server
+This project runs **MQTT + InfluxDB + Dashboard + Re-ID** on the laptop, while the PuppyPi focuses on sensing, local inference, and publishing snapshots.
 
-3. Run cloud subscriber
+### 1) Configure environment
+Copy `.env.example` to `.env` and fill in real values (especially `INFLUX_TOKEN`).
+
+```bash
+cp .env.example .env
+```
+
+### 2) Start cloud services (laptop)
+```bash
+docker-compose up -d mosquitto influxdb grafana dashboard websocket_server history_api stream_server
+```
+
+### 3) Run cloud subscriber (laptop)
+```bash
+set -a; source .env; set +a
 python3 cloud/pipeline/cloud_subscriber.py
+```
 
-You should see:
+You should see logs for MQTT subscriptions and re-identification.
 
-“Connecting to … localhost:1883”
-Subscriptions to the three topics
+### 4) Find laptop hotspot IP
+Use your hotspot IP so PuppyPi can publish to your laptop.
 
-4. Get your laptop hotspot IP
-Linux
+- Linux:
+```bash
 ip addr show
-Powershell
+```
+- Windows PowerShell:
+```bash
 ipconfig
-Look for the hotspot interface and its inet address. That is what the PuppyPi will publish to.
+```
 
-On PuppyPi (Edge Side)
-1. Start the edge publisher pointing to laptop
+Look for the mobile hotspot interface IPv4 address (often `192.168.137.1`).
+
+### 5) Start edge publisher (PuppyPi)
+```bash
 MQTT_BROKER_HOST=<LAPTOP_HOTSPOT_IP> python3 edge/cloud_bridge.py --headless
+```
 
-2. Confirm MQTT connection
-In the PuppyPi terminal, you should see:
-“EdgeMQTTPublisher connected to …”
+Optional (delete snapshots after publish):
+```bash
+DELETE_SNAPSHOT_AFTER_PUBLISH=true MQTT_BROKER_HOST=<LAPTOP_HOTSPOT_IP> python3 edge/cloud_bridge.py --headless
+```
 
-How to confirm it’s working
+### 6) Verify the pipeline
+- **Dashboard**: http://localhost:3000  
+- **InfluxDB**: http://localhost:8086 → Data Explorer  
+- **History API**: http://localhost:8780/health  
 
-Laptop subscriber logs
-You should see telemetry/intrusion handling logs.
-InfluxDB check
-Open http://localhost:8086 → Data Explorer → confirm points arriving.
+If the dashboard shows **RECONNECTING**, check:
+```bash
+docker-compose logs -f websocket_server
+```
+
+---
+
+## Whitelist & Re-Identification
+
+### Whitelist manager (UI)
+Use the **Manage Whitelist** button in the top bar to upload/delete images.
+Whitelist images are stored in `cloud/whitelist/` and persist across restarts.
+
+### Auto-reload whitelist (no restart)
+Set in `.env`:
+```
+REID_WHITELIST_RELOAD_S=15
+```
+
+### ArcFace backend (recommended)
+Set in `.env`:
+```
+REID_BACKEND=arcface
+REID_THRESHOLD_ARCFACE=0.55
+```
+
+Install:
+```bash
+pip install insightface onnxruntime
+```
+
+---
+
+## Local Re-ID Test (No PuppyPi)
+Test face matching with the same whitelist:
+```bash
+python3 cloud/pipeline/test_reid_local.py --input-dir cloud/test_snapshots
+```
+
+ArcFace test:
+```bash
+python3 cloud/pipeline/test_reid_arcface_local.py --input-dir cloud/test_snapshots
+```
