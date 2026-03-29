@@ -35,7 +35,7 @@ function resolveSnapshot(alert) {
   return null
 }
 
-export default function AlertLog({ alerts }) {
+export default function AlertLog({ alerts, onClear }) {
   const listRef = useRef(null)
   const [expandedId, setExpandedId] = useState(null)
 
@@ -48,9 +48,18 @@ export default function AlertLog({ alerts }) {
     <div className={styles.panel}>
       <div className={styles.header}>
         <span className={`${styles.title} label`}>EVENT LOG</span>
-        {alerts.length > 0 && (
-          <span className={`${styles.count} mono`}>{alerts.length}</span>
-        )}
+        <div className={styles.headerRight}>
+          {alerts.length > 0 && (
+            <span className={`${styles.count} mono`}>{alerts.length}</span>
+          )}
+          <button
+            className={styles.clearBtn}
+            onClick={() => onClear?.()}
+            disabled={alerts.length === 0}
+          >
+            Clear
+          </button>
+        </div>
       </div>
 
       <div className={styles.list} ref={listRef}>

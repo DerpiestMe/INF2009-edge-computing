@@ -78,7 +78,13 @@ export default function App() {
       <main className={styles.grid}>
         {/* Left col — CCTV-style event log (tall) */}
         <div className={styles.colEvents}>
-          <AlertLog alerts={alerts} />
+          <AlertLog
+            alerts={alerts}
+            onClear={() => {
+              localStorage.removeItem('pawpatrol.alerts')
+              window.location.reload()
+            }}
+          />
         </div>
 
         {/* Right col — system health + sensors */}

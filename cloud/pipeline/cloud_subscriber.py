@@ -78,6 +78,7 @@ REID_THRESHOLD = float(os.getenv("REID_THRESHOLD", "0.6"))
 REID_MARGIN = float(os.getenv("REID_MARGIN", "0.0"))
 REID_BACKEND = os.getenv("REID_BACKEND", "face_recognition").lower()
 REID_THRESHOLD_ARCFACE = float(os.getenv("REID_THRESHOLD_ARCFACE", "0.55"))
+REID_WHITELIST_RELOAD_S = float(os.getenv("REID_WHITELIST_RELOAD_S", "0"))
 
 MQTT_PUBLISH_CLIENT = None
 
@@ -175,6 +176,7 @@ class WhitelistReID:
         self._face_recognition = None
         self._arcface = None
         self._embeddings = []
+        self._lock = threading.Lock()
         self._load_backend()
         self._load_whitelist()
 
@@ -226,7 +228,8 @@ class WhitelistReID:
         return vec / norm, []
 
     def _load_whitelist(self):
-        self._embeddings = []
+        with self._lock:
+            self._embeddings = []
         if not self.whitelist_dir.exists():
             log.warning("Whitelist directory missing: %s", self.whitelist_dir)
             return
@@ -242,13 +245,18 @@ class WhitelistReID:
                 if emb is None:
                     log.warning("No face found in whitelist image: %s", path.name)
                     continue
-                self._embeddings.append((path.stem, emb))
+                with self._lock:
+                    self._embeddings.append((path.stem, emb))
             except Exception as e:
                 log.warning("Failed to load whitelist image %s: %s", path.name, e)
-        log.info("Whitelist loaded: %s identities", len(self._embeddings))
+        with self._lock:
+            count = len(self._embeddings)
+        log.info("Whitelist loaded: %s identities", count)
 
     def match(self, img_bgr, top_k: int = 3):
-        if not self._embeddings:
+        with self._lock:
+            embeddings = list(self._embeddings)
+        if not embeddings:
             return {"matched": False, "name": "Unknown", "score": 0.0, "face_locations": []}
 
         emb, boxes = self._embed(img_bgr)
@@ -260,7 +268,7 @@ class WhitelistReID:
 
         if self.backend == "arcface" and self._arcface is not None:
             ranked = sorted(
-                [(name, float(np.dot(emb, known))) for name, known in self._embeddings],
+                [(name, float(np.dot(emb, known))) for name, known in embeddings],
                 key=lambda x: x[1],
                 reverse=True,
             )[:top_k]
@@ -281,12 +289,12 @@ class WhitelistReID:
             }
 
         if self._use_face_recognition and self._face_recognition is not None:
-            known = [e for _, e in self._embeddings]
+            known = [e for _, e in embeddings]
             distances = self._face_recognition.face_distance(known, emb)
             if len(distances) == 0:
                 return {"matched": False, "name": "Unknown", "score": 0.0, "face_locations": boxes}
             best_idx = int(np.argmin(distances))
-            best_name = self._embeddings[best_idx][0]
+            best_name = embeddings[best_idx][0]
             best_score = 1.0 - float(distances[best_idx])
             margin_ok = True if self.margin <= 0 else False
             if self.margin > 0 and len(distances) > 1:
@@ -295,7 +303,7 @@ class WhitelistReID:
                 margin_ok = (best_score - second_score) >= self.margin
             matched = best_score >= self.threshold and margin_ok
             ranked = sorted(
-                [(self._embeddings[i][0], float(1.0 - distances[i])) for i in range(len(distances))],
+                [(embeddings[i][0], float(1.0 - distances[i])) for i in range(len(distances))],
                 key=lambda x: x[1],
                 reverse=True,
             )[:top_k]
@@ -309,13 +317,13 @@ class WhitelistReID:
             }
 
         # Fallback cosine similarity
-        for name, known in self._embeddings:
+        for name, known in embeddings:
             score = float(np.dot(emb, known))
             if score > best_score:
                 best_score = score
                 best_name = name
         ranked = sorted(
-            [(name, float(np.dot(emb, known))) for name, known in self._embeddings],
+            [(name, float(np.dot(emb, known))) for name, known in embeddings],
             key=lambda x: x[1],
             reverse=True,
         )[:top_k]
@@ -349,10 +357,24 @@ class ReIDProcessor:
             backend=backend,
         )
         self._on_result = on_result
+        self._reload_thread = None
+        self._reload_stop = False
 
     def start(self):
         self._thread.start()
         log.info("ReIDProcessor started")
+        if REID_WHITELIST_RELOAD_S and REID_WHITELIST_RELOAD_S > 0:
+            self._reload_thread = threading.Thread(target=self._reload_loop, daemon=True)
+            self._reload_thread.start()
+            log.info("Whitelist auto-reload enabled: every %.1fs", REID_WHITELIST_RELOAD_S)
+
+    def _reload_loop(self):
+        while not self._reload_stop:
+            time.sleep(REID_WHITELIST_RELOAD_S)
+            try:
+                self._reid._load_whitelist()
+            except Exception as e:
+                log.warning("Whitelist reload failed: %s", e)
 
     def enqueue(self, event_id: str, snapshot_b64: str, payload: dict, snapshot_path: str):
         self._job_queue.put((event_id, snapshot_b64, payload, snapshot_path))
