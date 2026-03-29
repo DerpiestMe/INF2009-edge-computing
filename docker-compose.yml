@@ -40,10 +40,13 @@ services:
       command: python history_api.py
       ports: ["8780:8780"]
       env_file: .env
+      environment:
+        - WHITELIST_DIR=/cloud/whitelist
       volumes:
         - ./cloud/dashboard:/app
         - ./cloud/data:/data
         - ./cloud_snapshots:/cloud_snapshots
+        - ./cloud/whitelist:/cloud/whitelist
       depends_on: [mosquitto]
 
   dashboard:
