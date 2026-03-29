@@ -66,7 +66,7 @@ class FullEdgePipelineApp:
         teleop_hold_timeout_s: float = 0.18,
         gait_mode: str = "walk",
         body_height: float = -10.0,
-        snapshot_cooldown_seconds: float = 15.0,
+        snapshot_cooldown_seconds: float = 5.0,
         wrist_servo_id: int = 10,
         wrist_start_pulse: int = 1100,
         wrist_on_start: bool = True,
@@ -125,9 +125,10 @@ class FullEdgePipelineApp:
         )
         self.zones = ZoneManager()
         self.events = IntrusionEventManager(
-            confirm_frames=4,
+            confirm_frames=1,
             cooldown_seconds=self.snapshot_cooldown_seconds,
             snapshot_dir=str(REPO_ROOT / "snapshots"),
+            trigger_on_any_person=True,
         )
         self.servo = CameraServoController(
             servo_id=servo_id,
@@ -549,19 +550,16 @@ class FullEdgePipelineApp:
                     self._track_first_person(detections, frame_width=frame_w, force=approach_tracking)
 
                 approach_state = "idle"
-                manual_override = self.enable_mobility and self._movement.replaying
+                manual_override = self.enable_mobility and self._movement.recording
                 manual_drive_active = self.enable_mobility and (time.time() < self._manual_drive_until_ts)
                 if manual_override and self._approach_active:
-                    self._logger.info("Approach paused: manual record/replay override active")
-                    approach_state = "paused_replay"
+                    self._logger.info("Approach paused: recording override active")
+                    approach_state = "paused_recording"
                 if manual_drive_active and self._approach_active:
                     self._movement.stop()
                     self._approach_active = False
                     self._logger.info("Approach paused: manual teleop override active")
                     approach_state = "paused_manual_teleop"
-                if self.enable_mobility and self.approach_on_detect and len(detections) > 0 and self._movement.recording:
-                    self._movement.stop_recording()
-                    self._logger.info("Approach: auto-stopped recording so approach controller can take over")
                 if self.enable_mobility and self.approach_on_detect and len(detections) > 0 and not manual_override and not manual_drive_active:
                     if not self._approach_active:
                         self._movement.stop_replay()
@@ -741,7 +739,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--teleop-hold-timeout", type=float, default=0.18)
     parser.add_argument("--gait-mode", choices=["walk", "amble", "trot"], default="walk")
     parser.add_argument("--body-height", type=float, default=-10.0, help="Robot body height for gait pose (typical range: -16..-5)")
-    parser.add_argument("--snapshot-cooldown-seconds", type=float, default=15.0)
+    parser.add_argument("--snapshot-cooldown-seconds", type=float, default=5.0)
     parser.add_argument("--wrist-servo-id", type=int, default=10)
     parser.add_argument("--wrist-start-pulse", type=int, default=1100)
     parser.add_argument("--disable-wrist-on-start", action="store_true")

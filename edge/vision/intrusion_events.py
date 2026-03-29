@@ -66,17 +66,19 @@ class ZoneManager:
 
 
 class IntrusionEventManager:
-    """Tracks intrusions in restricted zones with confirmation and cooldown."""
+    """Tracks person/intrusion events with confirmation and cooldown."""
 
     def __init__(
         self,
         confirm_frames: int = 4,
         cooldown_seconds: float = 5.0,
         snapshot_dir: str = "snapshots",
+        trigger_on_any_person: bool = False,
     ) -> None:
         self._logger = logging.getLogger(self.__class__.__name__)
         self.confirm_frames = confirm_frames
         self.cooldown_seconds = cooldown_seconds
+        self.trigger_on_any_person = bool(trigger_on_any_person)
         self.snapshot_dir = Path(snapshot_dir)
         self.snapshot_dir.mkdir(parents=True, exist_ok=True)
 
@@ -92,8 +94,11 @@ class IntrusionEventManager:
         """
         now = time.time()
 
-        # Check if any person is inside a restricted zone
-        has_intrusion = any(det.get("inside_zone", False) for det in detections)
+        # Either trigger on any detected person, or only on restricted-zone hits.
+        if self.trigger_on_any_person:
+            has_intrusion = len(detections) > 0
+        else:
+            has_intrusion = any(det.get("inside_zone", False) for det in detections)
 
         if has_intrusion:
             self._intrusion_counter += 1
@@ -123,7 +128,7 @@ class IntrusionEventManager:
                     "timestamp": now,
                     "type": "intrusion",
                     "zone_id": intrusion_in_zone[0].get("zone_id") if intrusion_in_zone else None,
-                    "num_persons": len(intrusion_in_zone),
+                    "num_persons": len(detections) if self.trigger_on_any_person else len(intrusion_in_zone),
                     "snapshot_path": str(snapshot_path),
                     "snapshot_saved": saved,
                     "confirm_frames": self.confirm_frames,

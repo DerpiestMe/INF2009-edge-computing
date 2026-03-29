@@ -192,3 +192,6 @@ npm-debug.log*
 # Build output
 dist/
 build/
+
+# Snapshots Folder
+snapshots/
