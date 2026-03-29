@@ -31,8 +31,8 @@ class FullEdgePipelineApp:
     def __init__(
         self,
         camera_index: int = 2,
-        width: int = 640,
-        height: int = 480,
+        width: int = 1280,
+        height: int = 720,
         fps: float = 30.0,
         model_path: str = "yolov8n.pt",
         confidence: float = 0.35,
@@ -703,8 +703,8 @@ class FullEdgePipelineApp:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Full edge pipeline (sensors + motion + zones + intrusion + servo)")
     parser.add_argument("--camera-index", type=int, default=2)
-    parser.add_argument("--width", type=int, default=640)
-    parser.add_argument("--height", type=int, default=480)
+    parser.add_argument("--width", type=int, default=1280)
+    parser.add_argument("--height", type=int, default=720)
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--model-path", default="yolov8n.pt")
     parser.add_argument("--confidence", type=float, default=0.35)

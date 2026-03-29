@@ -53,11 +53,31 @@ CLOUD_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Simple alert history persistence for dashboard
 ALERTS_DB_PATH = Path(os.getenv("ALERTS_DB_PATH", "cloud/data/alerts.jsonl"))
-ALERTS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+def _ensure_alerts_path(path: Path) -> Path:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8"):
+            pass
+        return path
+    except Exception as e:
+        fallback = Path("/tmp/alerts.jsonl")
+        log.warning("Alerts path not writable (%s). Falling back to %s", e, fallback)
+        try:
+            with open(fallback, "a", encoding="utf-8"):
+                pass
+        except Exception:
+            pass
+        return fallback
+
+ALERTS_DB_PATH = _ensure_alerts_path(ALERTS_DB_PATH)
 
 # Whitelist re-identification settings
 WHITELIST_DIR = Path(os.getenv("WHITELIST_DIR", "cloud/whitelist"))
 REID_THRESHOLD = float(os.getenv("REID_THRESHOLD", "0.6"))
+REID_MARGIN = float(os.getenv("REID_MARGIN", "0.0"))
+REID_BACKEND = os.getenv("REID_BACKEND", "face_recognition").lower()
+REID_THRESHOLD_ARCFACE = float(os.getenv("REID_THRESHOLD_ARCFACE", "0.55"))
 
 MQTT_PUBLISH_CLIENT = None
 
@@ -115,7 +135,7 @@ class InfluxWriter:
             point = point.field("snapshot_path", snapshot_path)
         if reid_result:
             point = point.field("person_name",  reid_result.get("name", "Unknown"))
-            point = point.field("reid_matched", reid_result.get("matched", False))
+            point = point.field("reid_matched", bool(reid_result.get("matched", False)))
         self._write_api.write(bucket=INFLUX_BUCKET, record=point)
 
 
@@ -144,18 +164,32 @@ def _append_alert_record(record: dict) -> None:
 
 # ── Whitelist Re-ID ───────────────────────────────────────────────────────────
 class WhitelistReID:
-    """Simple whitelist matcher for face images."""
+    """Simple whitelist matcher for face images (face_recognition or arcface)."""
 
-    def __init__(self, whitelist_dir: Path, threshold: float = 0.6):
+    def __init__(self, whitelist_dir: Path, threshold: float = 0.6, margin: float = 0.05, backend: str = "face_recognition"):
         self.whitelist_dir = Path(whitelist_dir)
         self.threshold = float(threshold)
+        self.margin = float(margin)
+        self.backend = backend
         self._use_face_recognition = False
         self._face_recognition = None
+        self._arcface = None
         self._embeddings = []
         self._load_backend()
         self._load_whitelist()
 
     def _load_backend(self):
+        if self.backend == "arcface":
+            try:
+                from insightface.app import FaceAnalysis  # type: ignore
+                self._arcface = FaceAnalysis(name="buffalo_l")
+                self._arcface.prepare(ctx_id=0, det_size=(640, 640))
+                log.info("Using ArcFace backend for whitelist matching")
+                return
+            except Exception as exc:
+                log.warning("ArcFace backend unavailable (%s). Falling back to face_recognition.", exc)
+                self.backend = "face_recognition"
+
         try:
             import face_recognition  # type: ignore
             self._face_recognition = face_recognition
@@ -167,6 +201,15 @@ class WhitelistReID:
 
     def _embed(self, img_bgr):
         import cv2
+
+        if self.backend == "arcface" and self._arcface is not None:
+            faces = self._arcface.get(img_bgr)
+            if not faces:
+                return None, []
+            face = faces[0]
+            emb = face.normed_embedding.astype(np.float32)
+            boxes = [face.bbox.astype(int).tolist()]  # [x1,y1,x2,y2]
+            return emb, boxes
 
         if self._use_face_recognition and self._face_recognition:
             rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
@@ -195,7 +238,7 @@ class WhitelistReID:
                 img = cv2.imread(str(path))
                 if img is None:
                     continue
-                emb = self._embed(img)
+                emb, _boxes = self._embed(img)
                 if emb is None:
                     log.warning("No face found in whitelist image: %s", path.name)
                     continue
@@ -204,9 +247,9 @@ class WhitelistReID:
                 log.warning("Failed to load whitelist image %s: %s", path.name, e)
         log.info("Whitelist loaded: %s identities", len(self._embeddings))
 
-    def match(self, img_bgr):
+    def match(self, img_bgr, top_k: int = 3):
         if not self._embeddings:
-            return {"matched": False, "name": "Unknown", "score": 0.0}
+            return {"matched": False, "name": "Unknown", "score": 0.0, "face_locations": []}
 
         emb, boxes = self._embed(img_bgr)
         if emb is None:
@@ -214,6 +257,28 @@ class WhitelistReID:
 
         best_name = "Unknown"
         best_score = 0.0
+
+        if self.backend == "arcface" and self._arcface is not None:
+            ranked = sorted(
+                [(name, float(np.dot(emb, known))) for name, known in self._embeddings],
+                key=lambda x: x[1],
+                reverse=True,
+            )[:top_k]
+            if ranked:
+                best_name, best_score = ranked[0]
+            margin_ok = True if self.margin <= 0 else False
+            if self.margin > 0 and len(ranked) > 1:
+                second_score = ranked[1][1]
+                margin_ok = (best_score - second_score) >= self.margin
+            matched = best_score >= self.threshold and margin_ok
+            return {
+                "matched": matched,
+                "name": best_name if matched else "Unknown",
+                "score": best_score,
+                "face_locations": boxes,
+                "top_matches": ranked,
+                "margin_ok": margin_ok,
+            }
 
         if self._use_face_recognition and self._face_recognition is not None:
             known = [e for _, e in self._embeddings]
@@ -223,8 +288,25 @@ class WhitelistReID:
             best_idx = int(np.argmin(distances))
             best_name = self._embeddings[best_idx][0]
             best_score = 1.0 - float(distances[best_idx])
-            matched = distances[best_idx] <= self.threshold
-            return {"matched": matched, "name": best_name if matched else "Unknown", "score": best_score, "face_locations": boxes}
+            margin_ok = True if self.margin <= 0 else False
+            if self.margin > 0 and len(distances) > 1:
+                sorted_scores = sorted([float(1.0 - d) for d in distances], reverse=True)
+                second_score = sorted_scores[1]
+                margin_ok = (best_score - second_score) >= self.margin
+            matched = best_score >= self.threshold and margin_ok
+            ranked = sorted(
+                [(self._embeddings[i][0], float(1.0 - distances[i])) for i in range(len(distances))],
+                key=lambda x: x[1],
+                reverse=True,
+            )[:top_k]
+            return {
+                "matched": matched,
+                "name": best_name if matched else "Unknown",
+                "score": best_score,
+                "face_locations": boxes,
+                "top_matches": ranked,
+                "margin_ok": margin_ok,
+            }
 
         # Fallback cosine similarity
         for name, known in self._embeddings:
@@ -232,8 +314,24 @@ class WhitelistReID:
             if score > best_score:
                 best_score = score
                 best_name = name
-        matched = best_score >= max(0.85, self.threshold)
-        return {"matched": matched, "name": best_name if matched else "Unknown", "score": best_score, "face_locations": boxes}
+        ranked = sorted(
+            [(name, float(np.dot(emb, known))) for name, known in self._embeddings],
+            key=lambda x: x[1],
+            reverse=True,
+        )[:top_k]
+        margin_ok = True if self.margin <= 0 else False
+        if self.margin > 0 and len(ranked) > 1:
+            second_score = ranked[1][1]
+            margin_ok = (best_score - second_score) >= self.margin
+        matched = best_score >= self.threshold and margin_ok
+        return {
+            "matched": matched,
+            "name": best_name if matched else "Unknown",
+            "score": best_score,
+            "face_locations": boxes,
+            "top_matches": ranked,
+            "margin_ok": margin_ok,
+        }
 
 
 class ReIDProcessor:
@@ -242,7 +340,14 @@ class ReIDProcessor:
     def __init__(self, whitelist_dir: Path, threshold: float, on_result):
         self._job_queue = Queue()
         self._thread = threading.Thread(target=self._worker, daemon=True)
-        self._reid = WhitelistReID(whitelist_dir=whitelist_dir, threshold=threshold)
+        backend = REID_BACKEND
+        thresh = REID_THRESHOLD_ARCFACE if backend == "arcface" else threshold
+        self._reid = WhitelistReID(
+            whitelist_dir=whitelist_dir,
+            threshold=thresh,
+            margin=REID_MARGIN,
+            backend=backend,
+        )
         self._on_result = on_result
 
     def start(self):
@@ -271,6 +376,14 @@ class ReIDProcessor:
             img_array = np.frombuffer(img_bytes, dtype=np.uint8)
             img_bgr = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
             result = self._reid.match(img_bgr)
+            face_locations = result.get("face_locations") or []
+            if face_locations:
+                for top, right, bottom, left in face_locations:
+                    cv2.rectangle(img_bgr, (left, top), (right, bottom), (0, 220, 80), 2)
+            if snapshot_path:
+                debug_path = str(Path(snapshot_path).with_name(Path(snapshot_path).stem + "_faces.jpg"))
+                cv2.imwrite(debug_path, img_bgr)
+                result["snapshot_debug_path"] = debug_path
             result.update({"event_id": event_id, "snapshot_path": snapshot_path})
             self._on_result(payload, result)
             return result
@@ -340,9 +453,15 @@ def _handle_reid_result(payload: dict, result: dict) -> None:
     name = result.get("name", "Unknown")
     score = float(result.get("score", 0.0))
     face_locations = result.get("face_locations") or []
-    log.info("ReID result for %s: matched=%s name=%s score=%.2f faces=%s",
-             event_id, matched, name, score, len(face_locations))
     event_id = result.get("event_id") or payload.get("event_id", "unknown")
+    top_matches = result.get("top_matches") or []
+    snapshot_debug_path = result.get("snapshot_debug_path")
+    log.info(
+        "ReID result for %s: matched=%s name=%s score=%.2f faces=%s top=%s",
+        event_id, matched, name, score, len(face_locations), top_matches
+    )
+    if snapshot_debug_path:
+        log.info("Saved face debug snapshot: %s", snapshot_debug_path)
     snapshot_path = result.get("snapshot_path")
     ts = _parse_ts_epoch(payload.get("timestamp"))
 
@@ -360,6 +479,8 @@ def _handle_reid_result(payload: dict, result: dict) -> None:
         "snapshot_path": snapshot_path,
         "snapshot_filename": Path(snapshot_path).name if snapshot_path else None,
         "face_locations": face_locations,
+        "top_matches": top_matches,
+        "snapshot_debug_path": snapshot_debug_path,
     })
 
     _publish_reid_result({
@@ -370,6 +491,8 @@ def _handle_reid_result(payload: dict, result: dict) -> None:
         "timestamp": payload.get("timestamp"),
         "snapshot_path": snapshot_path,
         "face_locations": face_locations,
+        "top_matches": top_matches,
+        "snapshot_debug_path": snapshot_debug_path,
     })
 
     if not matched:

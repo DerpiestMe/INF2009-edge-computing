@@ -28,12 +28,12 @@ from typing import Optional
 log = logging.getLogger("alert_router")
 
 # ── Config — fill these in ────────────────────────────────────────────────────
-GMAIL_SENDER       = "your.gmail@gmail.com"       # sender Gmail address
-GMAIL_APP_PASSWORD = "xxxx xxxx xxxx xxxx"        # Gmail App Password (not your login password)
+GMAIL_SENDER       = "danielxie27@gmail.com"       # sender Gmail address
+GMAIL_APP_PASSWORD = "wemr uicq eewz diog"        # Gmail App Password (not your login password)
 
 EMAIL_RECIPIENTS   = [
-    "member1@example.com",
-    "member2@example.com",
+    "x_zp@outlook.com",
+    "2403412@sit.singaporetech.edu.sg",
     "member3@example.com",
     "member4@example.com",
     "member5@example.com"
