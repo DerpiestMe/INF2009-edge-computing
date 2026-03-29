@@ -56,11 +56,17 @@ class FullEdgePipelineApp:
         enable_mobility: bool = False,
         approach_on_detect: bool = False,
         approach_close_bbox_height_px: int = 180,
+        approach_center_tolerance: float = 0.20,
+        approach_servo_center_tolerance: float = 0.14,
+        approach_target_distance_m: float = 0.0,
+        approach_distance_ref_m: float = 1.6,
+        approach_distance_ref_bbox_height_px: float = 180.0,
         teleop_speed_x: float = 5.0,
         teleop_yaw_deg_s: float = 12.0,
         teleop_hold_timeout_s: float = 0.18,
         gait_mode: str = "walk",
         body_height: float = -10.0,
+        snapshot_cooldown_seconds: float = 15.0,
         wrist_servo_id: int = 10,
         wrist_start_pulse: int = 1100,
         wrist_on_start: bool = True,
@@ -88,11 +94,17 @@ class FullEdgePipelineApp:
         self.enable_mobility = bool(enable_mobility)
         self.approach_on_detect = bool(approach_on_detect)
         self.approach_close_bbox_height_px = max(60, int(approach_close_bbox_height_px))
+        self.approach_center_tolerance = max(0.05, min(0.6, float(approach_center_tolerance)))
+        self.approach_servo_center_tolerance = max(0.04, min(0.6, float(approach_servo_center_tolerance)))
+        self.approach_target_distance_m = max(0.0, float(approach_target_distance_m))
+        self.approach_distance_ref_m = max(0.05, float(approach_distance_ref_m))
+        self.approach_distance_ref_bbox_height_px = max(20.0, float(approach_distance_ref_bbox_height_px))
         self.teleop_speed_x = float(teleop_speed_x)
         self.teleop_yaw_rate = float(teleop_yaw_deg_s) * (3.141592653589793 / 180.0)
         self.teleop_hold_timeout_s = max(0.05, float(teleop_hold_timeout_s))
         self.gait_mode = str(gait_mode).lower()
         self.body_height = float(body_height)
+        self.snapshot_cooldown_seconds = max(1.0, float(snapshot_cooldown_seconds))
         self.wrist_servo_id = int(wrist_servo_id)
         self.wrist_start_pulse = int(wrist_start_pulse)
         self.wrist_on_start = bool(wrist_on_start)
@@ -114,7 +126,7 @@ class FullEdgePipelineApp:
         self.zones = ZoneManager()
         self.events = IntrusionEventManager(
             confirm_frames=4,
-            cooldown_seconds=5,
+            cooldown_seconds=self.snapshot_cooldown_seconds,
             snapshot_dir=str(REPO_ROOT / "snapshots"),
         )
         self.servo = CameraServoController(
@@ -162,6 +174,8 @@ class FullEdgePipelineApp:
         self._manual_drive_until_ts = 0.0
         self._last_approach_log_ts = 0.0
         self._last_approach_state_log_ts = 0.0
+        self._last_alert_emit_ts: Dict[str, float] = {}
+        self._alert_emit_cooldown_s = 10.0
 
     def start(self) -> None:
         self._running = True
@@ -211,6 +225,15 @@ class FullEdgePipelineApp:
             self.teleop_speed_x,
             self.teleop_yaw_rate * 180.0 / 3.141592653589793,
         )
+        self._logger.info(
+            "Approach tuning: center_tol=%.2f servo_center_tol=%.2f target_distance_m=%.2f ref=(%.2fm @ %.1fpx)",
+            self.approach_center_tolerance,
+            self.approach_servo_center_tolerance,
+            self.approach_target_distance_m,
+            self.approach_distance_ref_m,
+            self.approach_distance_ref_bbox_height_px,
+        )
+        self._logger.info("Snapshot cooldown seconds: %.1f", self.snapshot_cooldown_seconds)
         self._logger.info("Mobility gait mode: %s", self.gait_mode)
         self._logger.info("Mobility body height: %.2f", self._movement.body_height)
         if self.approach_on_detect and not self.enable_mobility:
@@ -317,6 +340,43 @@ class FullEdgePipelineApp:
             print(f"[TEMP] {p['temperature_c']:.2f} C | [HUM] {p['humidity_rh']:.2f} %RH")
         if self._last_gas is not None and "ppm" in self._last_gas.get("payload", {}):
             print(f"[GAS] {self._last_gas['payload']['ppm']:.2f} ppm")
+
+    def _emit_sensor_alerts(self, record: Optional[Dict[str, Any]]) -> None:
+        if record is None:
+            return
+        payload = record.get("payload", {})
+        alerts = payload.get("alerts", [])
+        if not alerts:
+            return
+        now = time.time()
+        for alert in alerts:
+            key = "%s:%s:%s" % (
+                record.get("sensor_id", "unknown"),
+                alert.get("alert_code", "unknown"),
+                alert.get("severity", "info"),
+            )
+            last_ts = self._last_alert_emit_ts.get(key, 0.0)
+            if now - last_ts < self._alert_emit_cooldown_s:
+                continue
+            self._last_alert_emit_ts[key] = now
+            envelope = {
+                "schema": "edge.alert_event.v1",
+                "event_type": "sensor_alert",
+                "timestamp": now,
+                "sensor_type": record.get("sensor_type"),
+                "sensor_id": record.get("sensor_id"),
+                "status": record.get("status"),
+                "health": record.get("health"),
+                "alert": alert,
+                "reading": {
+                    "temperature_c": payload.get("temperature_c"),
+                    "humidity_rh": payload.get("humidity_rh"),
+                    "ppm": payload.get("ppm"),
+                    "unit": payload.get("unit"),
+                },
+            }
+            print("SENSOR ALERT")
+            print(json.dumps(envelope, indent=2))
 
     def _track_first_person(self, detections: List[Dict[str, Any]], frame_width: int, force: bool = False) -> None:
         if (not self.track_person and not force) or not detections:
@@ -425,12 +485,14 @@ class FullEdgePipelineApp:
                     temp_record = self.temp_sensor.read()
                     if temp_record is not None:
                         self._last_temp = temp_record
+                        self._emit_sensor_alerts(temp_record)
                     self._next_temp_due_ts = now_sensor + self._temp_poll_interval_s
 
                 if now_sensor >= self._next_gas_due_ts:
                     gas_record = self.gas_sensor.read()
                     if gas_record is not None:
                         self._last_gas = gas_record
+                        self._emit_sensor_alerts(gas_record)
                     self._next_gas_due_ts = now_sensor + self._gas_poll_interval_s
 
                 self._print_sensor_lines()
@@ -516,14 +578,25 @@ class FullEdgePipelineApp:
                         servo_center_pulse=self.servo.center_pulse,
                         servo_min_pulse=self.servo.min_pulse,
                         servo_max_pulse=self.servo.max_pulse,
+                        center_tolerance_norm=self.approach_center_tolerance,
+                        servo_center_tolerance_norm=self.approach_servo_center_tolerance,
+                        target_distance_m=(self.approach_target_distance_m if self.approach_target_distance_m > 0 else None),
+                        distance_ref_m=self.approach_distance_ref_m,
+                        distance_ref_bbox_height_px=self.approach_distance_ref_bbox_height_px,
                     )
                     now_approach = time.time()
                     if now_approach - self._last_approach_log_ts >= 1.0:
                         bbox_h = int(detections[0]["bbox"][3] - detections[0]["bbox"][1])
+                        est_distance_m = self._movement.estimate_distance_from_bbox_height(
+                            bbox_height_px=bbox_h,
+                            ref_distance_m=self.approach_distance_ref_m,
+                            ref_bbox_height_px=self.approach_distance_ref_bbox_height_px,
+                        )
                         self._logger.info(
-                            "Approach metrics: bbox_h=%s/%s servo_pulse=%s center=%s close=%s",
+                            "Approach metrics: bbox_h=%s/%s est_dist=%.2fm servo_pulse=%s center=%s close=%s",
                             bbox_h,
                             self.approach_close_bbox_height_px,
+                            est_distance_m,
                             self.servo.current_pulse,
                             self.servo.center_pulse,
                             close_enough,
@@ -658,11 +731,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--enable-mobility", action="store_true")
     parser.add_argument("--approach-on-detect", action="store_true")
     parser.add_argument("--approach-close-bbox-height", type=int, default=180)
+    parser.add_argument("--approach-center-tolerance", type=float, default=0.20)
+    parser.add_argument("--approach-servo-center-tolerance", type=float, default=0.14)
+    parser.add_argument("--approach-target-distance-m", type=float, default=0.0)
+    parser.add_argument("--approach-distance-ref-m", type=float, default=1.6)
+    parser.add_argument("--approach-distance-ref-bbox-height", type=float, default=180.0)
     parser.add_argument("--teleop-speed-x", type=float, default=5.0)
     parser.add_argument("--teleop-yaw-deg-s", type=float, default=12.0)
     parser.add_argument("--teleop-hold-timeout", type=float, default=0.18)
     parser.add_argument("--gait-mode", choices=["walk", "amble", "trot"], default="walk")
     parser.add_argument("--body-height", type=float, default=-10.0, help="Robot body height for gait pose (typical range: -16..-5)")
+    parser.add_argument("--snapshot-cooldown-seconds", type=float, default=15.0)
     parser.add_argument("--wrist-servo-id", type=int, default=10)
     parser.add_argument("--wrist-start-pulse", type=int, default=1100)
     parser.add_argument("--disable-wrist-on-start", action="store_true")
@@ -706,11 +785,17 @@ def main() -> None:
         enable_mobility=args.enable_mobility,
         approach_on_detect=args.approach_on_detect,
         approach_close_bbox_height_px=args.approach_close_bbox_height,
+        approach_center_tolerance=args.approach_center_tolerance,
+        approach_servo_center_tolerance=args.approach_servo_center_tolerance,
+        approach_target_distance_m=args.approach_target_distance_m,
+        approach_distance_ref_m=args.approach_distance_ref_m,
+        approach_distance_ref_bbox_height_px=args.approach_distance_ref_bbox_height,
         teleop_speed_x=args.teleop_speed_x,
         teleop_yaw_deg_s=args.teleop_yaw_deg_s,
         teleop_hold_timeout_s=args.teleop_hold_timeout,
         gait_mode=args.gait_mode,
         body_height=args.body_height,
+        snapshot_cooldown_seconds=args.snapshot_cooldown_seconds,
         wrist_servo_id=args.wrist_servo_id,
         wrist_start_pulse=args.wrist_start_pulse,
         wrist_on_start=not args.disable_wrist_on_start,

@@ -241,6 +241,11 @@ class PuppyPiMovementController:
         servo_min_pulse: Optional[int] = None,
         servo_max_pulse: Optional[int] = None,
         servo_align_deadband_ratio: float = 0.08,
+        center_tolerance_norm: float = 0.20,
+        servo_center_tolerance_norm: float = 0.14,
+        target_distance_m: Optional[float] = None,
+        distance_ref_m: float = 1.6,
+        distance_ref_bbox_height_px: float = 180.0,
     ) -> bool:
         """
         Orient and approach person until close enough.
@@ -261,8 +266,21 @@ class PuppyPiMovementController:
             servo_error_norm = (float(servo_current_pulse) - float(servo_center_pulse)) / half_span
             servo_error_norm = max(-1.0, min(1.0, servo_error_norm))
 
-        centered = abs(error_norm) <= 0.12 and abs(servo_error_norm) <= max(0.05, float(servo_align_deadband_ratio))
-        close_enough = bbox_h >= float(close_bbox_height_px) and centered
+        centered = (
+            abs(error_norm) <= max(0.05, float(center_tolerance_norm))
+            and abs(servo_error_norm) <= max(0.04, float(servo_center_tolerance_norm))
+        )
+
+        close_enough = False
+        if target_distance_m is not None and float(target_distance_m) > 0:
+            est_distance_m = self.estimate_distance_from_bbox_height(
+                bbox_height_px=bbox_h,
+                ref_distance_m=distance_ref_m,
+                ref_bbox_height_px=distance_ref_bbox_height_px,
+            )
+            close_enough = est_distance_m <= float(target_distance_m) and centered
+        else:
+            close_enough = bbox_h >= float(close_bbox_height_px) and centered
         if close_enough:
             self.send_velocity(0.0, 0.0, 0.0, record=False)
             return True
@@ -283,3 +301,15 @@ class PuppyPiMovementController:
         forward = max(1.0, min(max_forward_cm_s, forward_gain * max_forward_cm_s))
         self.send_velocity(forward, 0.0, yaw_cmd, record=False)
         return False
+
+    @staticmethod
+    def estimate_distance_from_bbox_height(
+        bbox_height_px: float,
+        ref_distance_m: float = 1.6,
+        ref_bbox_height_px: float = 180.0,
+    ) -> float:
+        """Monocular rough distance estimate using inverse bbox-height relation."""
+        h = max(1.0, float(bbox_height_px))
+        ref_h = max(1.0, float(ref_bbox_height_px))
+        ref_d = max(0.05, float(ref_distance_m))
+        return ref_d * (ref_h / h)
