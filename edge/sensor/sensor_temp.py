@@ -38,8 +38,8 @@ class TemperatureHumiditySensor:
         temp_high_warning_c: float = 30.0,
         temp_high_critical_c: float = 35.0,
         temp_change_window_seconds: float = 300.0,
-        temp_change_warning_c: float = 2.0,
-        temp_change_critical_c: float = 4.0,
+        temp_change_warning_c: float = 1.0,
+        temp_change_critical_c: float = 2.0,
         history_size: int = 600,
     ) -> None:
         self.sensor_type = "temperature_humidity"
