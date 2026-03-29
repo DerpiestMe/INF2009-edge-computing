@@ -1,4 +1,5 @@
 import logging
+import json
 import signal
 import time
 from collections import deque
@@ -96,6 +97,10 @@ class SensorManager:
 		record = schedule.sensor.read()
 		if record is not None:
 			self._ingest_record(record)
+			alerts = record.get("payload", {}).get("alerts", [])
+			if alerts:
+				for alert in alerts:
+					self._logger.warning("Sensor alert: %s", json.dumps(alert))
 
 	def _log_health_heartbeat(self) -> None:
 		now = time.time()

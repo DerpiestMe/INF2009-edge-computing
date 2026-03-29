@@ -33,12 +33,15 @@ class PuppyPiMovementController:
         max_x_cm_s: float = 20.0,
         max_yaw_rate_rad_s: float = math.radians(30.0),
         gait_mode: str = "walk",
+        body_height: float = -10.0,
     ) -> None:
         self.node_name = node_name
         self.velocity_topic = velocity_topic
         self.max_x_cm_s = float(max_x_cm_s)
         self.max_yaw_rate_rad_s = float(max_yaw_rate_rad_s)
         self.gait_mode = str(gait_mode).lower()
+        # More negative values generally lower the body. Keep conservative bounds.
+        self.body_height = max(-16.0, min(-5.0, float(body_height)))
 
         self._logger = logging.getLogger(self.__class__.__name__)
         self._rospy = None
@@ -123,7 +126,7 @@ class PuppyPiMovementController:
             "stance_x": 0.0,
             "stance_y": 0.0,
             "x_shift": -0.65,
-            "height": -10.0,
+            "height": self.body_height,
             "roll": 0.0,
             "pitch": 0.0,
             "yaw": 0.0,
@@ -143,12 +146,18 @@ class PuppyPiMovementController:
             "z_clearance": profile["z_clearance"],
         }
         try:
+            self._logger.info("Applying pose: gait=%s height=%.2f x_shift=%.2f", self.gait_mode, pose["height"], pose["x_shift"])
             self._pose_pub.publish(**pose)
             self._rospy.sleep(0.15)
             self._gait_pub.publish(**gait)
             self._rospy.sleep(0.15)
         except Exception as exc:
             self._logger.warning("Failed to publish default pose/gait: %s", exc)
+
+    def set_body_height(self, body_height: float) -> None:
+        self.body_height = max(-16.0, min(-5.0, float(body_height)))
+        if self._ready:
+            self._publish_default_pose_and_gait()
 
     def set_gait_mode(self, gait_mode: str) -> None:
         self.gait_mode = str(gait_mode).lower()
@@ -180,22 +189,27 @@ class PuppyPiMovementController:
         self._recording = True
         self._last_record_ts = time.time()
         self._logger.info("Movement recording started")
+        print("[PUPPYPI] Movement recording started")
 
     def stop_recording(self) -> None:
         self._recording = False
         self._logger.info("Movement recording stopped (%s steps)", len(self._recorded_steps))
+        print("[PUPPYPI] Movement recording stopped (%s steps)" % (len(self._recorded_steps),))
 
     def replay_recording(self, blocking: bool = False) -> None:
         if not self._recorded_steps:
             self._logger.info("No recorded movement steps to replay")
+            print("[PUPPYPI] No recorded movement steps to replay")
             return
         self._replay_stop = False
         if self._replay_thread is not None and self._replay_thread.is_alive():
             self._logger.info("Replay already running")
+            print("[PUPPYPI] Replay already running")
             return
 
         def _run_replay() -> None:
             self._logger.info("Replay started (%s steps)", len(self._recorded_steps))
+            print("[PUPPYPI] Replay started (%s steps)" % (len(self._recorded_steps),))
             for step in self._recorded_steps:
                 if self._replay_stop:
                     break
@@ -203,6 +217,7 @@ class PuppyPiMovementController:
                 time.sleep(step.dt)
             self.stop()
             self._logger.info("Replay finished")
+            print("[PUPPYPI] Replay finished")
 
         if blocking:
             _run_replay()
@@ -221,6 +236,16 @@ class PuppyPiMovementController:
         frame_height: int,
         close_bbox_height_px: int = 180,
         max_forward_cm_s: float = 6.0,
+        servo_current_pulse: Optional[int] = None,
+        servo_center_pulse: Optional[int] = None,
+        servo_min_pulse: Optional[int] = None,
+        servo_max_pulse: Optional[int] = None,
+        servo_align_deadband_ratio: float = 0.08,
+        center_tolerance_norm: float = 0.20,
+        servo_center_tolerance_norm: float = 0.14,
+        target_distance_m: Optional[float] = None,
+        distance_ref_m: float = 1.6,
+        distance_ref_bbox_height_px: float = 180.0,
     ) -> bool:
         """
         Orient and approach person until close enough.
@@ -235,13 +260,56 @@ class PuppyPiMovementController:
         error_px = person_cx - frame_cx
         error_norm = max(-1.0, min(1.0, error_px / max(1.0, frame_cx)))
 
-        yaw_cmd = error_norm * self.max_yaw_rate_rad_s
-        close_enough = bbox_h >= float(close_bbox_height_px)
+        servo_error_norm = 0.0
+        if None not in (servo_current_pulse, servo_center_pulse, servo_min_pulse, servo_max_pulse):
+            half_span = max(1.0, (float(servo_max_pulse) - float(servo_min_pulse)) / 2.0)
+            servo_error_norm = (float(servo_current_pulse) - float(servo_center_pulse)) / half_span
+            servo_error_norm = max(-1.0, min(1.0, servo_error_norm))
+
+        centered = (
+            abs(error_norm) <= max(0.05, float(center_tolerance_norm))
+            and abs(servo_error_norm) <= max(0.04, float(servo_center_tolerance_norm))
+        )
+
+        close_enough = False
+        if target_distance_m is not None and float(target_distance_m) > 0:
+            est_distance_m = self.estimate_distance_from_bbox_height(
+                bbox_height_px=bbox_h,
+                ref_distance_m=distance_ref_m,
+                ref_bbox_height_px=distance_ref_bbox_height_px,
+            )
+            close_enough = est_distance_m <= float(target_distance_m) and centered
+        else:
+            close_enough = bbox_h >= float(close_bbox_height_px) and centered
         if close_enough:
             self.send_velocity(0.0, 0.0, 0.0, record=False)
             return True
 
-        # Slow approach while turning to center target.
-        forward = max(1.0, min(max_forward_cm_s, (1.0 - abs(error_norm)) * max_forward_cm_s))
+        # Blend image error with camera-servo offset; servo offset dominates heading control.
+        body_error_norm = max(-1.0, min(1.0, 0.75 * servo_error_norm + 0.25 * error_norm))
+        yaw_cmd = body_error_norm * self.max_yaw_rate_rad_s
+        align_only = abs(servo_error_norm) > max(0.02, float(servo_align_deadband_ratio))
+
+        if align_only:
+            # First rotate in place until body heading roughly matches camera heading.
+            self.send_velocity(0.0, 0.0, yaw_cmd, record=False)
+            return False
+
+        # Then move forward with smaller turn corrections.
+        turn_penalty = min(1.0, abs(body_error_norm))
+        forward_gain = max(0.25, 1.0 - (0.75 * turn_penalty))
+        forward = max(1.0, min(max_forward_cm_s, forward_gain * max_forward_cm_s))
         self.send_velocity(forward, 0.0, yaw_cmd, record=False)
         return False
+
+    @staticmethod
+    def estimate_distance_from_bbox_height(
+        bbox_height_px: float,
+        ref_distance_m: float = 1.6,
+        ref_bbox_height_px: float = 180.0,
+    ) -> float:
+        """Monocular rough distance estimate using inverse bbox-height relation."""
+        h = max(1.0, float(bbox_height_px))
+        ref_h = max(1.0, float(ref_bbox_height_px))
+        ref_d = max(0.05, float(ref_distance_m))
+        return ref_d * (ref_h / h)
