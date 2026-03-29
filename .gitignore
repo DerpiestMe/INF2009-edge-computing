@@ -193,5 +193,7 @@ npm-debug.log*
 dist/
 build/
 
-# Snapshots Folder
+# Snapshots/whitelist Folder
 snapshots/
+cloud/whitelist
+cloud_snapshots
