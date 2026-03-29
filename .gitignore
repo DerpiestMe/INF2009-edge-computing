@@ -195,5 +195,4 @@ build/
 
 # Snapshots/whitelist Folder
 snapshots/
-cloud/whitelist
 cloud_snapshots
