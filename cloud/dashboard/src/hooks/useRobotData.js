@@ -141,7 +141,9 @@ export function useRobotData() {
           msg: `${authorized ? 'AUTHORIZED' : 'UNAUTHORIZED'}: ${data?.name || 'Unknown'} (score: ${(data?.score || 0).toFixed(2)})`,
           snapshot_path: data?.snapshot_path,
           event_id: data?.event_id,
-          face_locations: data?.face_locations
+          face_locations: data?.face_locations,
+          top_matches: data?.top_matches,
+          snapshot_debug_path: data?.snapshot_debug_path
         })
       }
 

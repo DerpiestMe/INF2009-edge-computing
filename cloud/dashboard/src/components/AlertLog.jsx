@@ -66,8 +66,9 @@ export default function AlertLog({ alerts }) {
             const isNew = i === 0
             const snapshot = resolveSnapshot(alert)
             const typeLabel = alert.type?.replace(/_/g, ' ') || 'EVENT'
-            const isIntrusion = /intruder|intrusion|unauthorized/i.test(typeLabel) || alert.severity === 'critical'
-            const isAuthorized = /authorized/i.test(typeLabel) || alert.severity === 'authorized'
+            const isUnauthorized = /unauthorized/i.test(typeLabel)
+            const isIntrusion = /intruder|intrusion/i.test(typeLabel) || isUnauthorized || alert.severity === 'critical'
+            const isAuthorized = (!isUnauthorized) && (/authorized/i.test(typeLabel) || alert.severity === 'authorized')
             const isExpanded = expandedId === alert.id
             const eventId = alert.event_id || alert.id
 
@@ -148,11 +149,25 @@ export default function AlertLog({ alerts }) {
                           <span className={styles.detailValue}>{alert.snapshot_path}</span>
                         </div>
                       )}
+                      {alert.snapshot_debug_path && (
+                        <div className={styles.detailRow}>
+                          <span className={styles.detailLabel}>FACE DEBUG</span>
+                          <span className={styles.detailValue}>{alert.snapshot_debug_path}</span>
+                        </div>
+                      )}
                       {alert.face_locations && alert.face_locations.length > 0 && (
                         <div className={styles.detailRow}>
                           <span className={styles.detailLabel}>FACE LOCATIONS</span>
                           <span className={styles.detailValue}>
                             {JSON.stringify(alert.face_locations)}
+                          </span>
+                        </div>
+                      )}
+                      {alert.top_matches && alert.top_matches.length > 0 && (
+                        <div className={styles.detailRow}>
+                          <span className={styles.detailLabel}>TOP MATCHES</span>
+                          <span className={styles.detailValue}>
+                            {JSON.stringify(alert.top_matches)}
                           </span>
                         </div>
                       )}
