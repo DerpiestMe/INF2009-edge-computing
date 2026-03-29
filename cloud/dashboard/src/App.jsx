@@ -1,11 +1,12 @@
+import { useState } from 'react'
 import { useRobotData } from './hooks/useRobotData'
-import CameraFeed    from './components/CameraFeed.jsx'
 import SensorCharts  from './components/SensorCharts.jsx'
 import AlertLog      from './components/AlertLog.jsx'
 import SystemHealth  from './components/SystemHealth.jsx'
+import WhitelistManager from './components/WhitelistManager.jsx'
 import styles from './App.module.css'
 
-function TopBar({ connected, alertCount }) {
+function TopBar({ connected, alertCount, onOpenWhitelist }) {
   const now = new Date()
   const timeStr = now.toLocaleTimeString()
   const dateStr = now.toLocaleDateString('en-SG', { day: '2-digit', month: 'short', year: 'numeric' })
@@ -32,6 +33,9 @@ function TopBar({ connected, alertCount }) {
       </div>
 
       <div className={styles.topRight}>
+        <button className={styles.whitelistBtn} onClick={onOpenWhitelist}>
+          Manage Whitelist
+        </button>
         <div className={styles.wsStatus}>
           <span
             className={styles.wsDot}
@@ -54,6 +58,7 @@ function TopBar({ connected, alertCount }) {
 }
 
 export default function App() {
+  const [whitelistOpen, setWhitelistOpen] = useState(false)
   const {
     connected,
     gasHistory, tempHistory,
@@ -64,16 +69,27 @@ export default function App() {
 
   return (
     <div className={styles.root}>
-      <TopBar connected={connected} alertCount={alerts.length} />
+      <TopBar
+        connected={connected}
+        alertCount={alerts.length}
+        onOpenWhitelist={() => setWhitelistOpen(true)}
+      />
 
       <main className={styles.grid}>
-        {/* Left col — camera (tall) */}
-        <div className={styles.colCamera}>
-          <CameraFeed alerts={alerts} persons={persons} />
+        {/* Left col — CCTV-style event log (tall) */}
+        <div className={styles.colEvents}>
+          <AlertLog
+            alerts={alerts}
+            onClear={() => {
+              localStorage.removeItem('pawpatrol.alerts')
+              window.location.reload()
+            }}
+          />
         </div>
 
-        {/* Middle col — sensor charts */}
-        <div className={styles.colCharts}>
+        {/* Right col — system health + sensors */}
+        <div className={styles.colSide}>
+          <SystemHealth sysStatus={sysStatus} connected={connected} />
           <SensorCharts
             gasHistory={gasHistory}
             tempHistory={tempHistory}
@@ -81,13 +97,9 @@ export default function App() {
             latestTemp={latestTemp}
           />
         </div>
-
-        {/* Right col — system health + alert log */}
-        <div className={styles.colRight}>
-          <SystemHealth sysStatus={sysStatus} connected={connected} />
-          <AlertLog alerts={alerts} />
-        </div>
       </main>
+
+      <WhitelistManager open={whitelistOpen} onClose={() => setWhitelistOpen(false)} />
     </div>
   )
 }

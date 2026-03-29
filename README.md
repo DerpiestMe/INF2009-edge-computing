@@ -141,3 +141,41 @@ Expected temperature/humidity I2C address: `0x38`.
 - If movement works only after `source .../setup.bash`, that is expected for ROS packages.
 - If using `docker cp` workflow, recopy when host files change.
 - If using bind mount workflow, edits on host appear in container immediately.
+
+Setup for laptop as cloud
+On laptop (Cloud side)
+1. Edit .env
+Set a real INFLUX_TOKEn from InfluxDB UI (localhost:8086 after docker service is running)
+
+2. Start cloud services
+docker-compose up -d mosquitto influxdb grafana dashboard websocket_server stream_server
+
+3. Run cloud subscriber
+python3 cloud/pipeline/cloud_subscriber.py
+
+You should see:
+
+“Connecting to … localhost:1883”
+Subscriptions to the three topics
+
+4. Get your laptop hotspot IP
+Linux
+ip addr show
+Powershell
+ipconfig
+Look for the hotspot interface and its inet address. That is what the PuppyPi will publish to.
+
+On PuppyPi (Edge Side)
+1. Start the edge publisher pointing to laptop
+MQTT_BROKER_HOST=<LAPTOP_HOTSPOT_IP> python3 edge/cloud_bridge.py --headless
+
+2. Confirm MQTT connection
+In the PuppyPi terminal, you should see:
+“EdgeMQTTPublisher connected to …”
+
+How to confirm it’s working
+
+Laptop subscriber logs
+You should see telemetry/intrusion handling logs.
+InfluxDB check
+Open http://localhost:8086 → Data Explorer → confirm points arriving.

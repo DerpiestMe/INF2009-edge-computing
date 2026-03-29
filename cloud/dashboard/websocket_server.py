@@ -1,5 +1,7 @@
 # websocket_server.py
-import asyncio, json
+import asyncio
+import json
+import os
 import paho.mqtt.client as mqtt
 import websockets
 
@@ -27,8 +29,10 @@ async def ws_handler(ws):
 async def main():
     mqttc = mqtt.Client()
     mqttc.on_message = on_mqtt_message
-    mqttc.connect("localhost", 1883)
-    mqttc.subscribe("robot/#")
+    mqtt_host = os.getenv("MQTT_BROKER_HOST", "localhost")
+    mqtt_port = int(os.getenv("MQTT_BROKER_PORT", "1883"))
+    mqttc.connect(mqtt_host, mqtt_port)
+    mqttc.subscribe("puppypi/#")
     mqttc.loop_start()
     async with websockets.serve(ws_handler, "0.0.0.0", 8765):
         await asyncio.Future()

@@ -6,26 +6,74 @@ services:
     volumes: ["./mosquitto.conf:/mosquitto/config/mosquitto.conf"]
 
   websocket_server:
-    build: ./cloud/dashboard
-    command: python websocket_server.py
-    ports: ["8765:8765"]
-    depends_on: [mosquitto]
+      build:
+        context: ./cloud/dashboard
+        dockerfile: Dockerfile.backend
+      command: python websocket_server.py
+      ports: ["8765:8765"]
+      env_file: .env
+      environment:
+        - MQTT_BROKER_HOST=mosquitto
+      volumes:
+        - ./cloud/dashboard:/app
+        - /app/node_modules
+      depends_on: [mosquitto]
 
   stream_server:
-    build: ./cloud/dashboard
-    command: python stream_server.py
-    ports: ["8766:8766"]
+      build:
+        context: ./cloud/dashboard
+        dockerfile: Dockerfile.backend
+      command: python stream_server.py
+      ports: ["8766:8766"]
+      env_file: .env
+      environment:
+        - MQTT_BROKER_HOST=mosquitto
+      volumes:
+        - ./cloud/dashboard:/app
+        - /app/node_modules
+      depends_on: [mosquitto]
+
+  history_api:
+      build:
+        context: ./cloud/dashboard
+        dockerfile: Dockerfile.backend
+      command: python history_api.py
+      ports: ["8780:8780"]
+      env_file: .env
+      environment:
+        - WHITELIST_DIR=/cloud/whitelist
+      volumes:
+        - ./cloud/dashboard:/app
+        - ./cloud/data:/data
+        - ./cloud_snapshots:/cloud_snapshots
+        - ./cloud/whitelist:/cloud/whitelist
+      depends_on: [mosquitto]
 
   dashboard:
-    build: ./cloud/dashboard
-    ports: ["3000:3000"]
-    command: npm run dev -- --host
+      build:
+        context: ./cloud/dashboard
+        dockerfile: Dockerfile.frontend
+      ports: ["3000:3000"]
+      command: npm run dev -- --host
+      env_file: .env
+      environment:
+        - VITE_HISTORY_API_URL=http://localhost:8780
+      volumes:
+        - ./cloud/dashboard:/app
+        - /app/node_modules
 
   influxdb:
     image: influxdb:2
     ports: ["8086:8086"]
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
 
   grafana:
     image: grafana/grafana:latest
     ports: ["3001:3000"]
     depends_on: [influxdb]
+
+volumes:
+  influxdb_data:
+  influxdb_config:
