@@ -340,6 +340,8 @@ def _handle_reid_result(payload: dict, result: dict) -> None:
     name = result.get("name", "Unknown")
     score = float(result.get("score", 0.0))
     face_locations = result.get("face_locations") or []
+    log.info("ReID result for %s: matched=%s name=%s score=%.2f faces=%s",
+             event_id, matched, name, score, len(face_locations))
     event_id = result.get("event_id") or payload.get("event_id", "unknown")
     snapshot_path = result.get("snapshot_path")
     ts = _parse_ts_epoch(payload.get("timestamp"))

@@ -31,11 +31,23 @@ export function useRobotData() {
   const wsRef = useRef(null)
   const reconnectTimer = useRef(null)
 
-  const addAlert = useCallback((alertObj) => {
-    setAlerts(prev => [
-      { id: Date.now() + Math.random(), ...alertObj },
-      ...prev.slice(0, 99)
-    ])
+  const upsertAlert = useCallback((alertObj) => {
+    setAlerts(prev => {
+      const id = alertObj.id || Date.now() + Math.random()
+      const eventId = alertObj.event_id
+      let replaced = false
+      const next = prev.map(item => {
+        if (eventId && item.event_id === eventId) {
+          replaced = true
+          return { ...item, ...alertObj, id: item.id || id }
+        }
+        return item
+      })
+      if (!replaced) {
+        next.unshift({ id, ...alertObj })
+      }
+      return next.slice(0, 100)
+    })
   }, [])
 
   const connect = useCallback(() => {
@@ -81,19 +93,19 @@ export function useRobotData() {
             { time: timeLabel, value: gasValue }
           ])
           if (gasSeverity === 'CRITICAL') {
-            addAlert({
-              type: 'GAS_HIGH',
-              severity: 'critical',
-              msg: `Gas reading ${gasValue} ppm — CRITICAL`,
-              ts: eventTs
-            })
+          upsertAlert({
+            type: 'GAS_HIGH',
+            severity: 'critical',
+            msg: `Gas reading ${gasValue} ppm — CRITICAL`,
+            ts: eventTs
+          })
           } else if (gasSeverity === 'WARNING') {
-            addAlert({
-              type: 'GAS_HIGH',
-              severity: 'warning',
-              msg: `Gas reading ${gasValue} ppm — WARNING`,
-              ts: eventTs
-            })
+          upsertAlert({
+            type: 'GAS_HIGH',
+            severity: 'warning',
+            msg: `Gas reading ${gasValue} ppm — WARNING`,
+            ts: eventTs
+          })
           }
         }
 
@@ -109,7 +121,7 @@ export function useRobotData() {
 
       if (topic === 'puppypi/events/intrusion') {
         const eventType = data?.event_type || 'MOTION'
-        addAlert({
+        upsertAlert({
           type: eventType,
           severity: 'info',
           ts: eventTs,
@@ -122,7 +134,7 @@ export function useRobotData() {
 
       if (topic === 'puppypi/events/reid') {
         const authorized = Boolean(data?.authorized)
-        addAlert({
+        upsertAlert({
           type: authorized ? 'AUTHORIZED' : 'UNAUTHORIZED',
           severity: authorized ? 'authorized' : 'critical',
           ts: eventTs,
@@ -144,7 +156,7 @@ export function useRobotData() {
         }))
       }
     }
-  }, [addAlert])
+  }, [upsertAlert])
 
   useEffect(() => {
     connect()
@@ -162,20 +174,32 @@ export function useRobotData() {
         const body = await res.json()
         const history = Array.isArray(body.alerts) ? body.alerts : []
         setAlerts(prev => {
-          const seen = new Set()
-          const merged = []
+          const byEvent = new Map()
+          const scoreType = (t = '') => {
+            const type = t.toLowerCase()
+            if (type.includes('unauthorized') || type.includes('authorized')) return 3
+            if (type.includes('intrusion')) return 2
+            if (type.includes('motion')) return 1
+            return 0
+          }
           const add = (item) => {
             if (!item) return
-            const key = item.event_id || item.snapshot_path || item.id || `${item.type}_${item.ts}`
-            if (seen.has(key)) return
-            seen.add(key)
             const withSnapshotUrl = item.snapshot_filename && !item.snapshot_url
               ? { ...item, snapshot_url: `${HISTORY_API_URL}/snapshots/${item.snapshot_filename}` }
               : item
-            merged.push(withSnapshotUrl)
+            const key = withSnapshotUrl.event_id || withSnapshotUrl.snapshot_path || withSnapshotUrl.id
+            if (!key) {
+              byEvent.set(Symbol(), withSnapshotUrl)
+              return
+            }
+            const existing = byEvent.get(key)
+            if (!existing || scoreType(withSnapshotUrl.type) >= scoreType(existing.type)) {
+              byEvent.set(key, { ...existing, ...withSnapshotUrl })
+            }
           }
           history.forEach(add)
           prev.forEach(add)
+          const merged = Array.from(byEvent.values())
           return merged.slice(0, 100)
         })
       } catch {
