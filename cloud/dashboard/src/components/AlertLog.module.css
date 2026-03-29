@@ -55,13 +55,15 @@
 /* Alert item */
 .item {
   display: flex;
-  align-items: flex-start;
+  align-items: stretch;
   justify-content: space-between;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
   gap: 8px;
   transition: background 0.15s;
   border-left: 2px solid transparent;
+  background: rgba(0, 0, 0, 0.06);
+  flex-direction: column;
 }
 
 .item:hover { background: var(--bg-hover); }
@@ -69,6 +71,18 @@
 .itemNew {
   border-left-color: var(--alert-color, var(--accent-cyan));
   animation: slideIn 0.25s ease;
+}
+
+.itemIntrusion {
+  border-left-color: var(--crit);
+  box-shadow: inset 0 0 0 1px rgba(255, 59, 92, 0.25);
+  background: linear-gradient(90deg, rgba(255, 59, 92, 0.15), rgba(0, 0, 0, 0.06));
+}
+
+.itemAuthorized {
+  border-left-color: var(--ok);
+  box-shadow: inset 0 0 0 1px rgba(52, 211, 153, 0.25);
+  background: linear-gradient(90deg, rgba(52, 211, 153, 0.12), rgba(0, 0, 0, 0.06));
 }
 
 @keyframes slideIn {
@@ -84,6 +98,88 @@
   min-width: 0;
 }
 
+.itemButton {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.itemButton:focus-visible {
+  outline: 2px solid var(--accent-cyan);
+  outline-offset: 2px;
+}
+
+.thumb {
+  position: relative;
+  width: 112px;
+  height: 72px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #0f151b;
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.thumbPlaceholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+  background: repeating-linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.03),
+    rgba(255, 255, 255, 0.03) 6px,
+    rgba(0, 0, 0, 0.08) 6px,
+    rgba(0, 0, 0, 0.08) 12px
+  );
+}
+
+.intrusionTag {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  background: rgba(255, 59, 92, 0.9);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  padding: 2px 6px;
+  border-radius: 2px;
+  box-shadow: 0 0 8px rgba(255, 59, 92, 0.6);
+}
+
+.authorizedTag {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  background: rgba(16, 185, 129, 0.9);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  padding: 2px 6px;
+  border-radius: 2px;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
+}
 .icon {
   font-size: 14px;
   margin-top: 1px;
@@ -97,6 +193,12 @@
   min-width: 0;
 }
 
+.typeRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .type {
   font-size: 10px;
   font-weight: 600;
@@ -106,9 +208,10 @@
 .msg {
   font-size: 11px;
   color: var(--text-secondary);
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .time {
@@ -117,4 +220,67 @@
   white-space: nowrap;
   flex-shrink: 0;
   padding-top: 2px;
+}
+
+.details {
+  margin-top: 8px;
+  padding: 10px;
+  border-top: 1px dashed var(--border);
+  display: grid;
+  grid-template-columns: 180px 1fr;
+  gap: 10px;
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.snapshotLarge {
+  width: 180px;
+  height: 120px;
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: #0f151b;
+}
+
+.snapshotLarge img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.detailsRight {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.detailRow {
+  display: grid;
+  grid-template-columns: 110px 1fr;
+  gap: 8px;
+  align-items: start;
+  font-size: 11px;
+}
+
+.detailLabel {
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  font-size: 9px;
+}
+
+.detailValue {
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+@media (max-width: 800px) {
+  .details {
+    grid-template-columns: 1fr;
+  }
+
+  .snapshotLarge {
+    width: 100%;
+    height: 180px;
+  }
 }

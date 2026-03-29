@@ -19,10 +19,13 @@ import logging
 import tempfile
 import threading
 import os
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 from queue import Queue, Empty
 
 import paho.mqtt.client as mqtt
+import numpy as np
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
 
@@ -43,6 +46,20 @@ INFLUX_URL    = os.getenv("INFLUX_URL", "http://localhost:8086")
 INFLUX_TOKEN  = os.getenv("INFLUX_TOKEN", "your-influxdb-token")   # set during InfluxDB setup
 INFLUX_ORG    = os.getenv("INFLUX_ORG", "puppypi")
 INFLUX_BUCKET = os.getenv("INFLUX_BUCKET", "puppypi-data")
+
+# Where to store snapshots received from edge (base64 over MQTT)
+CLOUD_SNAPSHOT_DIR = Path(os.getenv("CLOUD_SNAPSHOT_DIR", "cloud_snapshots"))
+CLOUD_SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Simple alert history persistence for dashboard
+ALERTS_DB_PATH = Path(os.getenv("ALERTS_DB_PATH", "cloud/data/alerts.jsonl"))
+ALERTS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# Whitelist re-identification settings
+WHITELIST_DIR = Path(os.getenv("WHITELIST_DIR", "cloud/whitelist"))
+REID_THRESHOLD = float(os.getenv("REID_THRESHOLD", "0.6"))
+
+MQTT_PUBLISH_CLIENT = None
 
 TOPICS = [
     ("puppypi/sensors/telemetry", 0),
@@ -84,7 +101,7 @@ class InfluxWriter:
 
         log.debug(f"Telemetry written to InfluxDB: {payload.get('gas_ppm')} ppm, {payload.get('temp_c')}C")
 
-    def write_intrusion_event(self, payload: dict, reid_result: dict = None):
+    def write_intrusion_event(self, payload: dict, reid_result: dict = None, snapshot_path: str = None):
         """Write an intrusion event to InfluxDB."""
         point = (
             Point("intrusion_event")
@@ -94,103 +111,178 @@ class InfluxWriter:
             .field("gas_ppm",     float(payload.get("gas_ppm") or 0))
             .field("temp_c",      float(payload.get("temp_c") or 0))
         )
+        if snapshot_path:
+            point = point.field("snapshot_path", snapshot_path)
         if reid_result:
             point = point.field("person_name",  reid_result.get("name", "Unknown"))
             point = point.field("reid_matched", reid_result.get("matched", False))
         self._write_api.write(bucket=INFLUX_BUCKET, record=point)
 
 
-# ── YOLOv8 Large Re-ID ────────────────────────────────────────────────────────
-class CloudVisionProcessor:
-    """
-    Processes intrusion snapshots with YOLOv8-Large for better accuracy.
-    Runs in a background thread off the main MQTT loop to avoid blocking.
-    """
+def _parse_ts_epoch(value) -> int:
+    if value is None:
+        return int(time.time())
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+        except ValueError:
+            return int(time.time())
+    return int(time.time())
 
-    def __init__(self):
+
+def _append_alert_record(record: dict) -> None:
+    try:
+        record = dict(record)
+        record.setdefault("id", record.get("event_id") or f"{record.get('type','event')}_{int(record.get('ts') or time.time())}")
+        with open(ALERTS_DB_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception as e:
+        log.error(f"Failed to persist alert record: {e}")
+
+
+# ── Whitelist Re-ID ───────────────────────────────────────────────────────────
+class WhitelistReID:
+    """Simple whitelist matcher for face images."""
+
+    def __init__(self, whitelist_dir: Path, threshold: float = 0.6):
+        self.whitelist_dir = Path(whitelist_dir)
+        self.threshold = float(threshold)
+        self._use_face_recognition = False
+        self._face_recognition = None
+        self._embeddings = []
+        self._load_backend()
+        self._load_whitelist()
+
+    def _load_backend(self):
+        try:
+            import face_recognition  # type: ignore
+            self._face_recognition = face_recognition
+            self._use_face_recognition = True
+            log.info("Using face_recognition backend for whitelist matching")
+        except Exception:
+            self._use_face_recognition = False
+            log.warning("face_recognition not available; using fallback embedding")
+
+    def _embed(self, img_bgr):
+        import cv2
+
+        if self._use_face_recognition and self._face_recognition:
+            rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            boxes = self._face_recognition.face_locations(rgb)
+            encodings = self._face_recognition.face_encodings(rgb, boxes)
+            if not encodings:
+                return None, []
+            return np.array(encodings[0], dtype=np.float32), boxes
+
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        small = cv2.resize(gray, (64, 64))
+        vec = small.astype(np.float32).flatten()
+        norm = np.linalg.norm(vec) + 1e-6
+        return vec / norm, []
+
+    def _load_whitelist(self):
+        self._embeddings = []
+        if not self.whitelist_dir.exists():
+            log.warning("Whitelist directory missing: %s", self.whitelist_dir)
+            return
+        for path in sorted(self.whitelist_dir.glob("*")):
+            if path.suffix.lower() not in (".jpg", ".jpeg", ".png"):
+                continue
+            try:
+                import cv2
+                img = cv2.imread(str(path))
+                if img is None:
+                    continue
+                emb = self._embed(img)
+                if emb is None:
+                    log.warning("No face found in whitelist image: %s", path.name)
+                    continue
+                self._embeddings.append((path.stem, emb))
+            except Exception as e:
+                log.warning("Failed to load whitelist image %s: %s", path.name, e)
+        log.info("Whitelist loaded: %s identities", len(self._embeddings))
+
+    def match(self, img_bgr):
+        if not self._embeddings:
+            return {"matched": False, "name": "Unknown", "score": 0.0}
+
+        emb, boxes = self._embed(img_bgr)
+        if emb is None:
+            return {"matched": False, "name": "Unknown", "score": 0.0, "face_locations": boxes}
+
+        best_name = "Unknown"
+        best_score = 0.0
+
+        if self._use_face_recognition and self._face_recognition is not None:
+            known = [e for _, e in self._embeddings]
+            distances = self._face_recognition.face_distance(known, emb)
+            if len(distances) == 0:
+                return {"matched": False, "name": "Unknown", "score": 0.0, "face_locations": boxes}
+            best_idx = int(np.argmin(distances))
+            best_name = self._embeddings[best_idx][0]
+            best_score = 1.0 - float(distances[best_idx])
+            matched = distances[best_idx] <= self.threshold
+            return {"matched": matched, "name": best_name if matched else "Unknown", "score": best_score, "face_locations": boxes}
+
+        # Fallback cosine similarity
+        for name, known in self._embeddings:
+            score = float(np.dot(emb, known))
+            if score > best_score:
+                best_score = score
+                best_name = name
+        matched = best_score >= max(0.85, self.threshold)
+        return {"matched": matched, "name": best_name if matched else "Unknown", "score": best_score, "face_locations": boxes}
+
+
+class ReIDProcessor:
+    """Processes snapshots and classifies them as authorized/unauthorized."""
+
+    def __init__(self, whitelist_dir: Path, threshold: float, on_result):
         self._job_queue = Queue()
-        self._thread    = threading.Thread(target=self._worker, daemon=True)
-        self._model     = None
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._reid = WhitelistReID(whitelist_dir=whitelist_dir, threshold=threshold)
+        self._on_result = on_result
 
     def start(self):
         self._thread.start()
-        log.info("CloudVisionProcessor started")
+        log.info("ReIDProcessor started")
 
-    def enqueue(self, event_id: str, snapshot_b64: str, payload: dict):
-        """Add an intrusion event to the vision processing queue."""
-        self._job_queue.put((event_id, snapshot_b64, payload))
-
-    def _load_model(self):
-        """Lazy-load YOLOv8-Large on first use."""
-        if self._model is None:
-            from ultralytics import YOLO
-            log.info("Loading YOLOv8-Large model (first use)...")
-            self._model = YOLO("yolov8l.pt")
-            log.info("YOLOv8-Large ready")
-        return self._model
+    def enqueue(self, event_id: str, snapshot_b64: str, payload: dict, snapshot_path: str):
+        self._job_queue.put((event_id, snapshot_b64, payload, snapshot_path))
 
     def _worker(self):
-        """Background worker — processes one vision job at a time."""
         while True:
             try:
-                event_id, snapshot_b64, payload = self._job_queue.get(timeout=5)
-                self._process(event_id, snapshot_b64, payload)
+                event_id, snapshot_b64, payload, snapshot_path = self._job_queue.get(timeout=5)
+                self._process(event_id, snapshot_b64, payload, snapshot_path)
                 self._job_queue.task_done()
             except Empty:
                 continue
             except Exception as e:
-                log.exception(f"Vision worker error: {e}")
+                log.exception(f"ReID worker error: {e}")
 
-    def _process(self, event_id: str, snapshot_b64: str, payload: dict) -> dict:
-        """
-        Decode snapshot, run YOLOv8-Large, return detection results.
-        Uses the same snapshot that intrusion_events.py already saved cleanly.
-        """
+    def _process(self, event_id: str, snapshot_b64: str, payload: dict, snapshot_path: str) -> dict:
         import cv2
-        import numpy as np
 
         try:
-            img_bytes  = base64.b64decode(snapshot_b64)
-            img_array  = np.frombuffer(img_bytes, dtype=np.uint8)
-            img_bgr    = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-
-            model      = self._load_model()
-            results    = model.predict(img_bgr, conf=0.4, classes=[0], verbose=False)
-
-            detections = []
-            for result in results:
-                for box in result.boxes:
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    detections.append({
-                        "bbox":       [x1, y1, x2, y2],
-                        "confidence": float(box.conf[0]),
-                    })
-
-            log.info(f"YOLOv8-Large: {len(detections)} person(s) in event {event_id}")
-
-            # Save annotated image locally for dashboard
-            annotated = img_bgr.copy()
-            for det in detections:
-                x1, y1, x2, y2 = det["bbox"]
-                cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 220), 2)
-                cv2.putText(annotated, f"{det['confidence']:.0%}", (x1, y1-8),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,220), 2)
-
-            out_path = Path(f"cloud_annotated/{event_id}_annotated.jpg")
-            out_path.parent.mkdir(exist_ok=True)
-            cv2.imwrite(str(out_path), annotated)
-
-            return {"event_id": event_id, "detections": detections, "annotated": str(out_path)}
-
+            img_bytes = base64.b64decode(snapshot_b64)
+            img_array = np.frombuffer(img_bytes, dtype=np.uint8)
+            img_bgr = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            result = self._reid.match(img_bgr)
+            result.update({"event_id": event_id, "snapshot_path": snapshot_path})
+            self._on_result(payload, result)
+            return result
         except Exception as e:
-            log.error(f"Vision processing failed for {event_id}: {e}")
+            log.error(f"ReID processing failed for {event_id}: {e}")
             return {}
 
 
 # ── Message Handlers ──────────────────────────────────────────────────────────
 alert_router   = AlertRouter()
 influx_writer  = InfluxWriter()
-vision_proc    = CloudVisionProcessor()
+reid_proc      = ReIDProcessor(whitelist_dir=WHITELIST_DIR, threshold=REID_THRESHOLD, on_result=None)
 
 def handle_telemetry(payload: dict):
     """Store telemetry to InfluxDB. Check gas threshold for alerts."""
@@ -201,6 +293,12 @@ def handle_telemetry(payload: dict):
     severity = payload.get("gas_severity", "NORMAL")
 
     if severity == "CRITICAL":
+        _append_alert_record({
+            "type": "GAS_HIGH",
+            "severity": "critical",
+            "ts": _parse_ts_epoch(payload.get("timestamp")),
+            "msg": f"Gas reading {gas_ppm:.1f} ppm — CRITICAL",
+        })
         alert_router.send_alert(
             alert_type = "HAZARD",
             subject    = "☣️ CRITICAL Gas Level — PuppyPi",
@@ -213,12 +311,77 @@ def handle_telemetry(payload: dict):
             dedup_key  = "gas-critical",
         )
     elif severity == "WARNING":
+        _append_alert_record({
+            "type": "GAS_HIGH",
+            "severity": "warning",
+            "ts": _parse_ts_epoch(payload.get("timestamp")),
+            "msg": f"Gas reading {gas_ppm:.1f} ppm — WARNING",
+        })
         alert_router.send_alert(
             alert_type = "HAZARD",
             subject    = "⚠️ Gas Warning — PuppyPi",
             message    = f"Gas level: {gas_ppm:.1f} PPM (WARNING)\nTime: {payload.get('timestamp')}",
             severity   = "MEDIUM",
             dedup_key  = "gas-warning",
+        )
+
+
+def _publish_reid_result(event: dict) -> None:
+    if MQTT_PUBLISH_CLIENT is None:
+        return
+    try:
+        MQTT_PUBLISH_CLIENT.publish("puppypi/events/reid", json.dumps(event), qos=0)
+    except Exception as e:
+        log.warning(f"Failed to publish reid result: {e}")
+
+
+def _handle_reid_result(payload: dict, result: dict) -> None:
+    matched = bool(result.get("matched"))
+    name = result.get("name", "Unknown")
+    score = float(result.get("score", 0.0))
+    face_locations = result.get("face_locations") or []
+    event_id = result.get("event_id") or payload.get("event_id", "unknown")
+    snapshot_path = result.get("snapshot_path")
+    ts = _parse_ts_epoch(payload.get("timestamp"))
+
+    influx_writer.write_intrusion_event(payload, reid_result=result, snapshot_path=snapshot_path)
+
+    alert_type = "AUTHORIZED" if matched else "UNAUTHORIZED"
+    severity = "info" if matched else "critical"
+    msg = f"{alert_type}: {name} (score: {score:.2f})"
+    _append_alert_record({
+        "type": alert_type,
+        "severity": severity,
+        "ts": ts,
+        "msg": msg,
+        "event_id": event_id,
+        "snapshot_path": snapshot_path,
+        "snapshot_filename": Path(snapshot_path).name if snapshot_path else None,
+        "face_locations": face_locations,
+    })
+
+    _publish_reid_result({
+        "event_id": event_id,
+        "authorized": matched,
+        "name": name,
+        "score": score,
+        "timestamp": payload.get("timestamp"),
+        "snapshot_path": snapshot_path,
+        "face_locations": face_locations,
+    })
+
+    if not matched:
+        alert_router.send_alert(
+            alert_type = "INTRUDER",
+            subject    = "🚨 Unauthorized Person Detected — PuppyPi",
+            message    = (
+                f"Intrusion event ID: {event_id}\n"
+                f"Matched: {name}\n"
+                f"Score: {score:.2f}\n"
+                f"Time: {payload.get('timestamp')}"
+            ),
+            severity   = "HIGH",
+            dedup_key  = event_id,
         )
 
 
@@ -229,31 +392,27 @@ def handle_intrusion(payload: dict):
     2. Enqueue for YOLOv8-Large processing (non-blocking)
     3. Send immediate alert
     """
-    event_id    = payload.get("event_id", "unknown")
+    event_id     = payload.get("event_id", "unknown")
     snapshot_b64 = payload.get("snapshot_b64")
+    snapshot_path = None
 
-    # Store immediately to InfluxDB
-    influx_writer.write_intrusion_event(payload)
-
-    # Enqueue for heavy vision processing (runs in background thread)
     if snapshot_b64:
-        vision_proc.enqueue(event_id, snapshot_b64, payload)
-    else:
-        log.warning(f"Intrusion event {event_id} has no snapshot attached")
+        safe_event_id = re.sub(r"[^a-zA-Z0-9_-]", "_", str(event_id))
+        filename = f"{safe_event_id}_{int(time.time())}.jpg"
+        snapshot_path = str(CLOUD_SNAPSHOT_DIR / filename)
+        try:
+            img_bytes = base64.b64decode(snapshot_b64)
+            with open(snapshot_path, "wb") as f:
+                f.write(img_bytes)
+        except Exception as e:
+            log.error(f"Failed to save snapshot for {event_id}: {e}")
+            snapshot_path = None
 
-    # Send alert immediately — don't wait for YOLOv8 result
-    alert_router.send_alert(
-        alert_type = "INTRUDER",
-        subject    = "🚨 Intruder Detected — PuppyPi",
-        message    = (
-            f"Intrusion event ID: {event_id}\n"
-            f"Time: {payload.get('timestamp')}\n"
-            f"Gas at time of event: {payload.get('gas_ppm')} PPM\n"
-            f"Temperature: {payload.get('temp_c')}°C"
-        ),
-        severity   = "HIGH",
-        dedup_key  = event_id,
-    )
+    # Enqueue for whitelist re-identification (runs in background thread)
+    if snapshot_b64:
+        reid_proc.enqueue(event_id, snapshot_b64, payload, snapshot_path)
+    else:
+        log.warning(f"Motion event {event_id} has no snapshot attached")
 
 
 def handle_heartbeat(payload: dict):
@@ -295,12 +454,15 @@ def on_disconnect(client, userdata, rc):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    vision_proc.start()
+    global MQTT_PUBLISH_CLIENT
+    reid_proc._on_result = _handle_reid_result
+    reid_proc.start()
 
     client = mqtt.Client(client_id="cloud-subscriber")
     client.on_connect    = on_connect
     client.on_message    = on_message
     client.on_disconnect = on_disconnect
+    MQTT_PUBLISH_CLIENT = client
 
     log.info(f"Connecting to PuppyPi Mosquitto at {MQTT_BROKER_HOST}:{MQTT_BROKER_PORT}...")
     log.info("Make sure your laptop is connected to the PuppyPi hotspot!")

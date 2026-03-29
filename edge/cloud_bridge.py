@@ -38,6 +38,7 @@ MQTT_BROKER_HOST     = os.getenv("MQTT_BROKER_HOST", "192.168.149.1")
 MQTT_BROKER_PORT     = int(os.getenv("MQTT_BROKER_PORT", "1883"))
 TELEMETRY_INTERVAL_S = 5.0          # publish sensor readings every 5s
 SNAPSHOT_DIR         = Path("snapshots")  # where intrusion_events saves clean frames
+DELETE_SNAPSHOT_AFTER_PUBLISH = os.getenv("DELETE_SNAPSHOT_AFTER_PUBLISH", "false").lower() in ("1", "true", "yes")
 
 TOPIC_TELEMETRY  = "puppypi/sensors/telemetry"
 TOPIC_INTRUSION  = "puppypi/events/intrusion"
@@ -60,6 +61,8 @@ class EdgeMQTTPublisher:
         self._thread  = None
         self._seen_snapshots: set = set()   # track already-published snapshots
         self._start_time = time.time()
+        self._cpu_prev_total = None
+        self._cpu_prev_idle = None
 
         self._client.on_connect    = self._on_connect
         self._client.on_disconnect = self._on_disconnect
@@ -182,12 +185,13 @@ class EdgeMQTTPublisher:
                     "event_id":    event_id,
                     "device_id":   "puppypi-01",
                     "timestamp":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "severity":    "INTRUDER",
+                    "severity":    "MOTION",
+                    "event_type":  "MOTION",
                     "snapshot_b64": b64_image,
                     "snapshot_path": str(snap_path),
                     # Include latest sensor readings at time of intrusion
-            "gas_ppm":  self._app._last_gas.get("payload", {}).get("ppm") if self._app._last_gas else None,
-            "temp_c":   self._app._last_temp.get("payload", {}).get("temperature_c") if self._app._last_temp else None,
+                    "gas_ppm":  self._app._last_gas.get("payload", {}).get("ppm") if self._app._last_gas else None,
+                    "temp_c":   self._app._last_temp.get("payload", {}).get("temperature_c") if self._app._last_temp else None,
         }
 
                 self._client.publish(
@@ -196,19 +200,75 @@ class EdgeMQTTPublisher:
                     qos=1,   # at-least-once for critical events
                 )
                 log.info(f"Intrusion event published: {event_id}")
+                if DELETE_SNAPSHOT_AFTER_PUBLISH:
+                    try:
+                        snap_path.unlink()
+                    except Exception as e:
+                        log.warning(f"Failed to delete snapshot {snap_path}: {e}")
 
             except Exception as e:
                 log.error(f"Failed to publish snapshot {snap_path}: {e}")
 
     def _publish_heartbeat(self):
         """Publish robot status heartbeat."""
+        cpu = self._read_cpu_percent()
+        ram = self._read_ram_percent()
+        fps = float(getattr(self._app, "_fps_ema", 0.0) or 0.0)
         payload = {
             "device_id":  "puppypi-01",
             "timestamp":  time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "state":      "RUNNING",
             "uptime_sec": int(time.time() - self._start_time),
+            "cpu":        cpu,
+            "ram":        ram,
+            "fps":        round(fps, 1),
         }
         self._client.publish(TOPIC_HEARTBEAT, json.dumps(payload), qos=0)
+
+    def _read_cpu_percent(self) -> float:
+        try:
+            with open("/proc/stat", "r", encoding="utf-8") as f:
+                line = f.readline()
+            parts = line.strip().split()
+            if len(parts) < 5 or parts[0] != "cpu":
+                return 0.0
+            nums = [int(p) for p in parts[1:]]
+            idle = nums[3] + (nums[4] if len(nums) > 4 else 0)
+            total = sum(nums)
+            if self._cpu_prev_total is None:
+                self._cpu_prev_total = total
+                self._cpu_prev_idle = idle
+                return 0.0
+            total_delta = total - self._cpu_prev_total
+            idle_delta = idle - (self._cpu_prev_idle or 0)
+            self._cpu_prev_total = total
+            self._cpu_prev_idle = idle
+            if total_delta <= 0:
+                return 0.0
+            usage = (1.0 - (idle_delta / total_delta)) * 100.0
+            return max(0.0, min(100.0, round(usage, 1)))
+        except Exception:
+            return 0.0
+
+    def _read_ram_percent(self) -> float:
+        try:
+            mem_total = None
+            mem_available = None
+            with open("/proc/meminfo", "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("MemTotal:"):
+                        mem_total = int(line.split()[1])
+                    elif line.startswith("MemAvailable:"):
+                        mem_available = int(line.split()[1])
+                    if mem_total is not None and mem_available is not None:
+                        break
+            if not mem_total or mem_available is None:
+                return 0.0
+            used = mem_total - mem_available
+            usage = (used / mem_total) * 100.0
+            return max(0.0, min(100.0, round(usage, 1)))
+        except Exception:
+            return 0.0
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

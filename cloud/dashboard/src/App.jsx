@@ -1,5 +1,4 @@
 import { useRobotData } from './hooks/useRobotData'
-import CameraFeed    from './components/CameraFeed.jsx'
 import SensorCharts  from './components/SensorCharts.jsx'
 import AlertLog      from './components/AlertLog.jsx'
 import SystemHealth  from './components/SystemHealth.jsx'
@@ -67,25 +66,20 @@ export default function App() {
       <TopBar connected={connected} alertCount={alerts.length} />
 
       <main className={styles.grid}>
-        {/* Left col — camera (tall) */}
-        <div className={styles.colCamera}>
-          <CameraFeed alerts={alerts} persons={persons} />
+        {/* Left col — CCTV-style event log (tall) */}
+        <div className={styles.colEvents}>
+          <AlertLog alerts={alerts} />
         </div>
 
-        {/* Middle col — sensor charts */}
-        <div className={styles.colCharts}>
+        {/* Right col — system health + sensors */}
+        <div className={styles.colSide}>
+          <SystemHealth sysStatus={sysStatus} connected={connected} />
           <SensorCharts
             gasHistory={gasHistory}
             tempHistory={tempHistory}
             latestGas={latestGas}
             latestTemp={latestTemp}
           />
-        </div>
-
-        {/* Right col — system health + alert log */}
-        <div className={styles.colRight}>
-          <SystemHealth sysStatus={sysStatus} connected={connected} />
-          <AlertLog alerts={alerts} />
         </div>
       </main>
     </div>

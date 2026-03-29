@@ -12,6 +12,11 @@ services:
       command: python websocket_server.py
       ports: ["8765:8765"]
       env_file: .env
+      environment:
+        - MQTT_BROKER_HOST=mosquitto
+      volumes:
+        - ./cloud/dashboard:/app
+        - /app/node_modules
       depends_on: [mosquitto]
 
   stream_server:
@@ -21,6 +26,24 @@ services:
       command: python stream_server.py
       ports: ["8766:8766"]
       env_file: .env
+      environment:
+        - MQTT_BROKER_HOST=mosquitto
+      volumes:
+        - ./cloud/dashboard:/app
+        - /app/node_modules
+      depends_on: [mosquitto]
+
+  history_api:
+      build:
+        context: ./cloud/dashboard
+        dockerfile: Dockerfile.backend
+      command: python history_api.py
+      ports: ["8780:8780"]
+      env_file: .env
+      volumes:
+        - ./cloud/dashboard:/app
+        - ./cloud/data:/data
+        - ./cloud_snapshots:/cloud_snapshots
       depends_on: [mosquitto]
 
   dashboard:
@@ -30,6 +53,11 @@ services:
       ports: ["3000:3000"]
       command: npm run dev -- --host
       env_file: .env
+      environment:
+        - VITE_HISTORY_API_URL=http://localhost:8780
+      volumes:
+        - ./cloud/dashboard:/app
+        - /app/node_modules
 
   influxdb:
     image: influxdb:2
