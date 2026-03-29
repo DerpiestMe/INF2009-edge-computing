@@ -420,45 +420,65 @@ influx_writer  = InfluxWriter()
 reid_proc      = ReIDProcessor(whitelist_dir=WHITELIST_DIR, threshold=REID_THRESHOLD, on_result=None)
 
 def handle_telemetry(payload: dict):
-    """Store telemetry to InfluxDB. Check gas threshold for alerts."""
+    """Store telemetry to InfluxDB and surface edge-side sensor anomaly alerts."""
     influx_writer.write_telemetry(payload)
+    alert_items = []
+    for key in ("sensor_alerts", "gas_alerts", "temp_alerts"):
+        items = payload.get(key)
+        if isinstance(items, list):
+            alert_items.extend([i for i in items if isinstance(i, dict)])
 
-    # Alert on gas threshold breach — uses your existing alert_router unchanged
-    gas_ppm  = payload.get("gas_ppm", 0) or 0
-    severity = payload.get("gas_severity", "NORMAL")
+    if not alert_items:
+        return
 
-    if severity == "CRITICAL":
+    seen = set()
+    for alert in alert_items:
+        ts = _parse_ts_epoch(alert.get("timestamp") or payload.get("timestamp"))
+        sensor_type = str(alert.get("sensor_type") or "sensor")
+        sensor_id = str(alert.get("sensor_id") or payload.get("device_id", "puppypi-01"))
+        alert_code = str(alert.get("alert_code") or "sensor_anomaly")
+        severity = str(alert.get("severity") or "warning").lower()
+        key = (sensor_id, alert_code, ts)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        type_prefix = "TEMP" if "temp" in sensor_type.lower() else ("GAS" if "gas" in sensor_type.lower() else "SENSOR")
+        msg = str(alert.get("message") or f"{sensor_type} anomaly detected ({alert_code})")
+        record_id = f"{sensor_id}_{alert_code}_{ts}"
         _append_alert_record({
-            "type": "GAS_HIGH",
-            "severity": "critical",
-            "ts": _parse_ts_epoch(payload.get("timestamp")),
-            "msg": f"Gas reading {gas_ppm:.1f} ppm — CRITICAL",
+            "id": record_id,
+            "type": f"{type_prefix}_ANOMALY",
+            "severity": severity,
+            "ts": ts,
+            "msg": msg,
+            "sensor_type": sensor_type,
+            "sensor_id": sensor_id,
+            "alert_code": alert_code,
+            "metric": alert.get("metric"),
+            "value": alert.get("value"),
+            "threshold": alert.get("threshold"),
+            "comparison": alert.get("comparison"),
+            "baseline": alert.get("baseline"),
+            "delta": alert.get("delta"),
+            "window_s": alert.get("window_s"),
         })
-        alert_router.send_alert(
-            alert_type = "HAZARD",
-            subject    = "☣️ CRITICAL Gas Level — PuppyPi",
-            message    = (
-                f"Gas level: {gas_ppm:.1f} PPM (CRITICAL)\n"
-                f"Temperature: {payload.get('temp_c')}°C\n"
-                f"Time: {payload.get('timestamp')}"
-            ),
-            severity   = "CRITICAL",
-            dedup_key  = "gas-critical",
-        )
-    elif severity == "WARNING":
-        _append_alert_record({
-            "type": "GAS_HIGH",
-            "severity": "warning",
-            "ts": _parse_ts_epoch(payload.get("timestamp")),
-            "msg": f"Gas reading {gas_ppm:.1f} ppm — WARNING",
-        })
-        alert_router.send_alert(
-            alert_type = "HAZARD",
-            subject    = "⚠️ Gas Warning — PuppyPi",
-            message    = f"Gas level: {gas_ppm:.1f} PPM (WARNING)\nTime: {payload.get('timestamp')}",
-            severity   = "MEDIUM",
-            dedup_key  = "gas-warning",
-        )
+
+        if severity in ("warning", "critical"):
+            alert_router.send_alert(
+                alert_type="HAZARD",
+                subject=f"{severity.upper()} Sensor Alert — PuppyPi",
+                message=(
+                    f"Sensor: {sensor_type} ({sensor_id})\n"
+                    f"Code: {alert_code}\n"
+                    f"Message: {msg}\n"
+                    f"Value: {alert.get('value')} {alert.get('metric')}\n"
+                    f"Threshold: {alert.get('comparison')} {alert.get('threshold')}\n"
+                    f"Time: {payload.get('timestamp')}"
+                ),
+                severity="CRITICAL" if severity == "critical" else "MEDIUM",
+                dedup_key=f"{sensor_id}:{alert_code}:{severity}",
+            )
 
 
 def _publish_reid_result(event: dict) -> None:

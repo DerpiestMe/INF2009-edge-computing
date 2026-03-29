@@ -133,24 +133,34 @@ class EdgeMQTTPublisher:
         }
 
         # Extract temp fields if available
+        temp_alerts = []
         if temp and "payload" in temp:
             tp = temp["payload"]
             payload["temp_c"]    = tp.get("temperature_c")
             payload["humidity"]  = tp.get("humidity_rh")
+            payload["temp_anomaly"] = bool(tp.get("anomaly", False))
+            temp_alerts = list(tp.get("alerts") or [])
+            payload["temp_alerts"] = temp_alerts
 
         # Extract gas fields if available
+        gas_alerts = []
         if gas and "payload" in gas:
             gp = gas["payload"]
             payload["gas_ppm"]   = gp.get("ppm")
+            payload["gas_anomaly"] = bool(gp.get("anomaly", False))
+            gas_alerts = list(gp.get("alerts") or [])
+            payload["gas_alerts"] = gas_alerts
 
-            # Basic threshold classification (edge-side only)
-            ppm = gp.get("ppm", 0)
-            if ppm > 500:
+            # Backward-compatible severity derived from anomaly alerts (not raw ppm threshold).
+            severities = {str(a.get("severity", "")).lower() for a in gas_alerts}
+            if "critical" in severities:
                 payload["gas_severity"] = "CRITICAL"
-            elif ppm > 200:
+            elif "warning" in severities:
                 payload["gas_severity"] = "WARNING"
             else:
                 payload["gas_severity"] = "NORMAL"
+
+        payload["sensor_alerts"] = gas_alerts + temp_alerts
 
         self._client.publish(
             TOPIC_TELEMETRY,

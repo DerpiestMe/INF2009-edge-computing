@@ -16,7 +16,7 @@ export function useRobotData() {
       const raw = localStorage.getItem('pawpatrol.alerts')
       if (!raw) return []
       const parsed = JSON.parse(raw)
-      return Array.isArray(parsed) ? parsed : []
+      return Array.isArray(parsed) ? parsed.filter(item => item?.type !== 'GAS_HIGH') : []
     } catch {
       return []
     }
@@ -83,7 +83,6 @@ export function useRobotData() {
         const gasValue = data?.gas_ppm
         const tempValue = data?.temp_c
         const humidityValue = data?.humidity
-        const gasSeverity = data?.gas_severity || 'NORMAL'
 
         if (typeof gasValue === 'number') {
           const gasPoint = { value: gasValue, ts: eventTs }
@@ -92,21 +91,6 @@ export function useRobotData() {
             ...prev.slice(-(MAX_POINTS - 1)),
             { time: timeLabel, value: gasValue }
           ])
-          if (gasSeverity === 'CRITICAL') {
-          upsertAlert({
-            type: 'GAS_HIGH',
-            severity: 'critical',
-            msg: `Gas reading ${gasValue} ppm — CRITICAL`,
-            ts: eventTs
-          })
-          } else if (gasSeverity === 'WARNING') {
-          upsertAlert({
-            type: 'GAS_HIGH',
-            severity: 'warning',
-            msg: `Gas reading ${gasValue} ppm — WARNING`,
-            ts: eventTs
-          })
-          }
         }
 
         if (typeof tempValue === 'number') {
@@ -117,6 +101,41 @@ export function useRobotData() {
             { time: timeLabel, value: tempValue }
           ])
         }
+
+        // Only raise gas/temp alerts from edge-side anomaly alerts, not from raw ppm bands.
+        const sensorAlerts = [
+          ...(Array.isArray(data?.sensor_alerts) ? data.sensor_alerts : []),
+          ...(Array.isArray(data?.gas_alerts) ? data.gas_alerts : []),
+          ...(Array.isArray(data?.temp_alerts) ? data.temp_alerts : []),
+        ]
+        const seenAlertIds = new Set()
+        sensorAlerts.forEach((alert) => {
+          if (!alert || typeof alert !== 'object') return
+          const ts = Number.isFinite(alert.timestamp)
+            ? Math.floor(Number(alert.timestamp))
+            : (eventTs || Math.floor(Date.now() / 1000))
+          const sensorId = String(alert.sensor_id || alert.sensor_type || 'sensor')
+          const alertCode = String(alert.alert_code || 'anomaly')
+          const alertId = `${sensorId}_${alertCode}_${ts}`
+          if (seenAlertIds.has(alertId)) return
+          seenAlertIds.add(alertId)
+
+          const sensorType = String(alert.sensor_type || 'SENSOR').toUpperCase()
+          upsertAlert({
+            id: alertId,
+            type: `${sensorType}_ANOMALY`,
+            severity: String(alert.severity || 'warning').toLowerCase(),
+            ts,
+            msg: String(alert.message || `${sensorType} anomaly (${alertCode})`),
+            sensor_type: alert.sensor_type,
+            sensor_id: alert.sensor_id,
+            alert_code: alert.alert_code,
+            metric: alert.metric,
+            value: alert.value,
+            threshold: alert.threshold,
+            comparison: alert.comparison,
+          })
+        })
       }
 
       if (topic === 'puppypi/events/intrusion') {
@@ -174,7 +193,9 @@ export function useRobotData() {
         const res = await fetch(`${HISTORY_API_URL}/api/alerts?limit=200`)
         if (!res.ok) return
         const body = await res.json()
-        const history = Array.isArray(body.alerts) ? body.alerts : []
+        const history = Array.isArray(body.alerts)
+          ? body.alerts.filter(item => item?.type !== 'GAS_HIGH')
+          : []
         setAlerts(prev => {
           const byEvent = new Map()
           const scoreType = (t = '') => {
@@ -227,3 +248,4 @@ export function useRobotData() {
     sysStatus,
   }
 }
+
