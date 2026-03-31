@@ -1,178 +1,178 @@
 # Development History and Methodology (Current State)
 
-This document reflects the repository state as of the latest updates in this branch.
+This document reflects the repository state as of **March 31, 2026**.
 
-## 1) Objective
-- Build an edge-first PuppyPi pipeline that combines:
-  - Multi-sensor ingestion (webcam, gas, temperature/humidity)
-  - Local person detection
-  - Camera-servo tracking/sweep control
-  - Intrusion event generation + snapshot capture
-  - Optional robot mobility with manual teleop and approach behavior
+## 1) Project Objective
+- Build an edge-first PuppyPi system that combines:
+  - webcam person detection
+  - gas + temperature/humidity sensing
+  - camera-servo sweep/tracking
+  - intrusion snapshot/event generation
+  - optional robot mobility (teleop, record/replay, approach-on-detect)
+  - cloud/dashboard telemetry + alerting
 
-## 2) Early Integration Milestone
-- Integrated sensor modules:
+## 2) Core Integration Milestone
+- Integrated edge modules into runnable pipelines:
+  - `edge/run_sensor_vision_servo.py`
+  - `edge/run_edge_full_pipeline.py`
+  - `edge/run_vision_servo_tracking_only.py`
+- Sensor modules used:
   - `edge/sensor/sensor_webcam.py`
   - `edge/sensor/sensor_gas.py`
   - `edge/sensor/sensor_temp.py`
-- Added integrated run scripts:
-  - `edge/run_sensor_vision_servo.py`
-  - `edge/run_edge_full_pipeline.py`
-- Added vision stack:
+- Vision/event modules used:
   - `edge/vision/vision_inference.py`
   - `edge/vision/motion_detector.py`
   - `edge/vision/zone_manager.py`
   - `edge/vision/intrusion_events.py`
 
-## 3) Servo Driver Compatibility Phase
-### Problem
-- PuppyPi SDK imports differed across environments (missing `Board`, `HiwonderSDK`, etc.).
+## 3) Servo Driver Compatibility and Control
+### Challenge
+- PuppyPi SDK import paths were inconsistent across environments (`Board`, `HiwonderSDK`, ROS SDK variants).
 
 ### Mitigation
-- Implemented fallback/diagnostic servo controller:
+- Added fallback detection and diagnostics in:
   - `edge/control/robot_controller.py`
-  - multi-path module loading
-  - fallback to `ros_robot_controller_sdk`
-  - selectable mode: `auto | pwm | bus`
+- Implemented selectable camera servo backend:
+  - `auto | pwm | bus`
 
-### Outcome
-- Camera servo control stabilized with PWM mode on servo/channel ID 9 in target runtime.
+### Result
+- Camera servo control stabilized on PuppyPi via `ros_robot_controller_sdk` PWM mode.
 
-## 4) Performance and Smoothness Work
-### Problem
-- Initial runtime exhibited poor FPS and jitter under integrated load.
-
-### Mitigation
-- Added inference scheduling and loop pacing in full pipeline:
-  - temporal quantization (`--infer-interval`)
-  - spatial quantization (`--infer-width/--infer-height`)
-  - optional motion-gated inference
-  - forced refresh interval
-  - detection reuse between inference updates
-  - loop FPS cap (`--max-loop-fps`)
-- Reduced blocking effects:
-  - decoupled sensor polling cadence
-  - shorter gas serial timeout in integrated runner
-
-### Outcome
-- Runtime became significantly smoother than initial <1 FPS behavior.
-
-## 5) Snapshot Integrity and Event Robustness
-### Problem
-- Need cloud-ready snapshots without overlays; snapshot saves needed clearer reliability.
+## 4) Performance Optimization and Runtime Smoothness
+### Challenge
+- Initial integrated pipeline was near/sub-1 FPS (capture bottleneck dominant).
 
 ### Mitigation
-- Snapshots are generated from clean frame path:
-  - `events.process(clean_frame, detections)`
-- Improved snapshot manager:
-  - parent directory creation with `parents=True`
-  - write-success check for `cv2.imwrite`
-  - explicit `snapshot_saved` flag in event payload
-  - unique event sequence in filenames
-  - configurable cooldown in full pipeline (`--snapshot-cooldown-seconds`)
+- Added inference quantization and pacing:
+  - `--infer-width/--infer-height`
+  - `--infer-interval`
+  - `--force-infer-interval`
+  - `--max-loop-fps`
+  - detection reuse between infer cycles
+- Decoupled sensor polling cadence from vision loop:
+  - gas poll at 0.1s cadence
+  - temp poll at 1.0s cadence
 
-### Outcome
-- Cleaner downstream inference inputs and lower snapshot spam rate.
+### Result
+- Field-tested runtime improved to about **17-18 FPS** in latest smooth configuration.
 
-## 6) Mobility, Teleop, and Replay Iterations
-### Problem
-- Key handling and replay behavior were inconsistent in some runtime paths.
+## 5) Snapshot/Event Pipeline Evolution
+### Earlier behavior
+- Snapshot trigger depended on restricted-zone intrusion logic.
 
-### Mitigation
-- Updated full pipeline control loop:
-  - key handling on every loop (not only rendered frames)
-  - explicit terminal feedback for `r/p/h`
-  - replay no longer fights teleop velocity stream
-  - manual teleop can temporarily override auto-approach
-- Updated movement controller:
-  - stronger visibility logs for recording/replay lifecycle
-  - body height parameterization for stance tuning (`--body-height`)
+### Current behavior
+- Snapshot trigger is now any detected person in full pipeline mode:
+  - `IntrusionEventManager(trigger_on_any_person=True, confirm_frames=1)`
+- Default snapshot cooldown is now **5 seconds** (`--snapshot-cooldown-seconds` default `5.0`).
+- Snapshots use clean frame path (no overlay boxes) for downstream cloud inference quality.
 
-### Outcome
-- Manual movement + record/replay now provide observable feedback and improved behavior.
+### Result
+- More useful face/subject captures while reducing burst spam with cooldown.
 
-## 7) Approach-on-Detect Evolution
-### Problem
-- Robot could spend too long aligning or stop too early due simplistic closeness gating.
+## 6) Mobility, Record/Replay, and Approach Control
+### Challenge
+- Conflicts between teleop, replay, and auto-approach behavior.
 
-### Mitigation
-- Improved approach logic in `puppypi_movement.py` and full pipeline:
-  - body heading uses blend of:
-    - person center error in frame
-    - camera servo offset from center
-  - optional align-first rotation behavior
-  - closeness now checks both:
-    - proximity metric
-    - centering tolerance
-- Added tunable CLI controls:
-  - `--approach-center-tolerance`
-  - `--approach-servo-center-tolerance`
-  - `--approach-target-distance-m`
-  - `--approach-distance-ref-m`
-  - `--approach-distance-ref-bbox-height`
-  - `--approach-close-bbox-height` (legacy pixel-threshold mode)
-- Added approach state/metric logs for debugging:
-  - detection count
-  - replay/recording override status
-  - estimated distance
-  - close/not-close status
+### Current control rules
+- Manual recording now overrides approach.
+- Replay/patrol can be interrupted by person detection and approach can take over.
+- `approach_on_detect` no longer auto-stops recording; recording must be stopped by operator.
 
-### Outcome
-- Approach behavior is now more tunable and diagnosable in field testing.
+### Result
+- Behavior now matches intended workflow:
+  - record route manually without forced approach takeover
+  - approach detected person during replay/patrol operations
 
-## 8) Sensor Anomaly Alerting (Dashboard-Ready Payloads)
-### Problem
-- Needed actionable alerts (not only raw readings) for cloud/dashboard consumption.
+## 7) Person Tracking and Servo Direction Fixes
+### Challenge
+- Initial servo direction mapping was reversed (left/right key and tracking response opposite).
 
 ### Mitigation
-- Added structured anomaly alerts directly in sensor payloads:
-  - schema: `edge.sensor_alert.v1`
-  - fields include severity, metric, threshold, comparison, message, optional baseline/delta/window
-- Gas sensor (`edge/sensor/sensor_gas.py`):
-  - absolute threshold alerts (warning/critical/emergency)
-  - short-window spike alerts against rolling median baseline
-- Temperature sensor (`edge/sensor/sensor_temp.py`):
-  - low/high absolute alerts
-  - rapid-change alerts over time window (up or down)
-- Full pipeline now emits throttled alert envelopes:
-  - schema: `edge.alert_event.v1`
-  - includes sensor metadata, health, reading context, and alert object
-- Sensor manager also logs structured alert JSON entries.
+- Added servo direction multiplier and corrected directional behavior in tracking/control path.
 
-### Outcome
-- Alert semantics are now available for MQTT/dashboard publishing and cloud event ingestion.
+### Result
+- Manual sweep and person-centering now align with expected direction semantics.
 
-## 9) Current Runtime Characteristics (What Is True Now)
-- Full runner: `edge/run_edge_full_pipeline.py`
-  - sensor ingestion, person detection, zone intrusion, clean snapshots
-  - servo tracking/sweep controls
-  - optional mobility + teleop + record/replay
-  - optional approach behavior with tunable center/distance heuristics
-  - snapshot cooldown control
-  - sensor alert event emission
-- Additional runners available:
-  - `edge/run_sensor_vision_servo.py`
-  - `edge/run_vision_servo_tracking_only.py`
+## 8) Sensor Anomaly Alerting on Edge
+### Gas anomaly model (`edge/sensor/sensor_gas.py`)
+- Absolute thresholds:
+  - warning: `>= 1000 ppm`
+  - critical: `>= 2000 ppm`
+  - emergency: `>= 5000 ppm`
+- Spike detection vs rolling median baseline:
+  - warning delta: `>= 300 ppm`
+  - critical delta: `>= 600 ppm`
+  - window: `120 s`
 
-## 10) Key Challenges and How They Were Mitigated
-1. Hardware SDK variability:
-   - Mitigation: robust import fallback and diagnostics in servo controller.
-2. Low FPS / jitter:
-   - Mitigation: inference quantization, loop pacing, and non-blocking sensor strategy.
-3. Replay/teleop conflicts:
-   - Mitigation: prevent concurrent command stream conflicts, add explicit control feedback.
-4. Premature or indecisive approach behavior:
-   - Mitigation: blended heading logic + configurable tolerances + metric logging.
-5. Alert-less raw telemetry:
-   - Mitigation: structured anomaly events with schema and severity.
-6. Snapshot uncertainty:
-   - Mitigation: save-result checks, cooldown control, and clean-frame capture policy.
+### Temperature anomaly model (`edge/sensor/sensor_temp.py`)
+- Absolute low/high thresholds:
+  - low warning: `<= 18C`, low critical: `<= 15C`
+  - high warning: `>= 30C`, high critical: `>= 35C`
+- Change/spike thresholds over window:
+  - window: `300 s` (5 min)
+  - warning delta: **`>= 1.0C`** (updated from 2.0C)
+  - critical delta: **`>= 2.0C`** (updated from 4.0C)
 
-## 11) Poster-Friendly Methodology Summary
-- Edge-first modular architecture
-- Instrumentation-driven bottleneck isolation
-- Compatibility-first hardware integration
-- Parameterized control for field tuning
-- Structured event design for cloud interoperability
-- Iterative close-the-loop validation with runtime diagnostics
+### Output format
+- Sensor payload includes:
+  - `anomaly` boolean
+  - `alerts` array (`edge.sensor_alert.v1`)
 
+## 9) Cloud + Dashboard Integration (Latest Updates)
+### Challenge
+- Dashboard showed frequent `GAS_HIGH` warnings at low-300 ppm due legacy generic threshold path.
+
+### Root cause
+- Legacy cloud/dashboard logic used telemetry `gas_severity` bands, not sensor anomaly alerts.
+
+### Mitigation implemented
+- `edge/cloud_bridge.py` telemetry now forwards:
+  - `gas_alerts`, `temp_alerts`, `sensor_alerts`
+  - `gas_anomaly`, `temp_anomaly`
+- `cloud/pipeline/cloud_subscriber.py` telemetry handler now:
+  - consumes anomaly alert arrays
+  - writes structured anomaly records (`GAS_ANOMALY`, `TEMP_ANOMALY`, etc.)
+  - stops creating `GAS_HIGH` from raw ppm bands
+- `cloud/dashboard/src/hooks/useRobotData.js` now:
+  - stops generating `GAS_HIGH` from telemetry severity
+  - creates dashboard alerts only from anomaly alert arrays
+  - filters legacy `GAS_HIGH` entries from local storage/history load
+
+### Result
+- Dashboard sensor alerts now align with edge anomaly logic instead of noisy baseline ppm bands.
+
+## 10) Cloud/Edge Data Flow (Current)
+1. Edge pipeline reads sensors + camera and performs local person detection.
+2. Intrusion snapshots are captured on edge and published via MQTT.
+3. Edge telemetry includes raw readings + anomaly alert arrays.
+4. Cloud subscriber stores telemetry/events, runs whitelist re-ID, and persists alert history.
+5. Websocket server forwards MQTT topics to frontend.
+6. Dashboard renders live telemetry, event stream, and anomaly-driven alerts.
+
+## 11) Main Challenges and Mitigations Summary
+1. SDK/environment mismatch:
+   - fallback servo backend loading + diagnostics.
+2. Very low FPS/jitter:
+   - quantized inference + loop pacing + decoupled sensor cadence.
+3. Snapshot usefulness and spam:
+   - clean-frame capture + any-person trigger + cooldown throttling.
+4. Control-priority conflicts:
+   - explicit override rules between recording/replay/approach/teleop.
+5. Alert noise:
+   - moved from generic ppm warning bands to structured sensor anomaly alerts.
+
+## 12) Current Feature Set (Latest Version)
+- Full integrated edge runtime:
+  - sensors + vision + snapshots + servo tracking/sweep + optional mobility.
+- Person-approach mode with configurable center/distance parameters.
+- Structured anomaly alerts from gas/temp sensors suitable for MQTT/cloud.
+- Cloud ingestion with alert history persistence and dashboard live updates.
+- Whitelist face re-identification flow on intrusion snapshots.
+
+## 13) Poster-Friendly Methodology Points
+- Edge-first architecture with modular fallbacks.
+- Iterative bottleneck isolation with instrumentation metrics.
+- Parameterized control design for rapid field tuning.
+- Structured event contracts for cloud interoperability.
+- Continuous feedback loop: observe -> tune -> validate -> document.

@@ -41,19 +41,9 @@ Notes:
 - Run `docker cp` from the **host shell**, not from inside container.
 - If you use bind mount (recommended), you do not need repeated `docker cp`.
 
-### 3) Start a ROS Noetic container with bind mount (recommended workflow)
+### 3) Enter ROS Noetic container
 ```bash
-docker run -it --name puppypi-dev \
-  -u ubuntu \
-  -w /home/ubuntu/INF2009-edge-computing \
-  -v /home/pi/INF2009-edge-computing:/home/ubuntu/INF2009-edge-computing \
-  ros:noetic \
-  /bin/bash
-```
-
-If container already exists:
-```bash
-docker start -ai puppypi-dev
+docker exec -it -u ubuntu -w /home/ubuntu/INF2009-edge-computing 82df027dddb8 /bin/bash
 ```
 
 ### 4) Inside container: source ROS environments
@@ -69,32 +59,21 @@ python3 -c "import rospy; print('rospy ok')"
 rospack find puppy_control
 ```
 
-### 5) Install Python dependencies (inside container)
+### 5) Install Python dependencies (if required)
 ```bash
 pip3 install opencv-python pyserial smbus2 ultralytics
 ```
 
 ### 6) Run scripts
 
-Full edge pipeline (recommended):
+Full edge pipeline without cloud dasboard:
 ```bash
-python3 edge/run_edge_full_pipeline.py --camera-index 2 --servo-id 9 --servo-mode pwm --track-person
+python3 edge/run_edge_full_pipeline.py --camera-index 2   --servo-id 9 --wrist-start-pulse 750  --servo-mode pwm   --enable-mobility   --gait-mode walk   --teleop-speed-x 4   --teleop-yaw-deg-s 10   --body-height -8 --track-person --approach-on-detect --profile-perf --approach-close-bbox-height 400
 ```
 
 Vision + servo tracking only (no leg movement):
 ```bash
 python3 edge/run_vision_servo_tracking_only.py --camera-index 2 --servo-id 9 --servo-mode pwm
-```
-
-Sensor + vision + servo (earlier integrated runner):
-```bash
-python3 edge/run_sensor_vision_servo.py --camera-index 2 --servo-id 9 --servo-mode pwm
-```
-
-Movement sanity tests:
-```bash
-python3 edge/control/test_forward_movement.py --speed 8 --duration 1.5
-python3 edge/control/test_ijkl_movement.py --speed 10 --yaw-deg 25
 ```
 
 ## Relevant Scripts And What They Do
@@ -183,6 +162,11 @@ Look for the mobile hotspot interface IPv4 address (often `192.168.137.1`).
 ### 5) Start edge publisher (PuppyPi)
 ```bash
 MQTT_BROKER_HOST=<LAPTOP_HOTSPOT_IP> python3 edge/cloud_bridge.py --headless
+```
+
+Full edge pipepine with movement and approach logic
+```bash
+DELETE_SNAPSHOT_AFTER_PUBLISH=true MQTT_BROKER_HOST=<LAPTOP_HOTSPOT_IP> python3 edge/cloud_bridge.py --camera-index 2   --servo-id 9 --wrist-start-pulse 750  --servo-mode pwm   --enable-mobility   --gait-mode walk   --teleop-speed-x 4   --teleop-yaw-deg-s 10   --body-height -8 --track-person --approach-on-detect --profile-perf --approach-close-bbox-height 400 
 ```
 
 Optional (delete snapshots after publish):
